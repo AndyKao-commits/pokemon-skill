@@ -1,0 +1,1125 @@
+/* ============ menu.js — menú principal, colección y mejoras ============ */
+G.MenuUI = (() => {
+  const $ = G.UI.$;
+  const GEN_NAMES = ['Kanto', 'Johto', 'Hoenn', 'Sinnoh', 'Teselia', 'Kalos', 'Alola', 'Galar', 'Paldea'];
+  const GEN_LABEL = ['Kanto', 'Johto', 'Hoenn', 'Sinnoh', 'Unova', 'Kalos', 'Alola', 'Galar', 'Paldea'];
+  let dexGen = 1, dexSel = null;
+  let resOwn = 'all', resShiny = false, resSel = null;
+  // Filtros de la colección (se combinan): tengo / me faltan, rarezas (varias),
+  // shiny, favoritos, tipo y búsqueda; y el orden. Duran mientras no recargas.
+  const DEX0 = () => ({ status: 'all', rar: new Set(), shiny: false, fav: false, type: '', q: '', sort: 'num' });
+  let dexF = DEX0();
+  const SORTS = [['num', 'Nº'], ['name', 'Nombre'], ['rar', 'Rareza'], ['new', 'Recién conseguidos'], ['used', 'Más usados']];
+
+  let dexDrawer = false, dexSheet = false, dexTab = 'col';
+  function shutDrawer() {
+    dexDrawer = false;
+    const d = $('dex-drawer');
+    if (d) d.classList.add('hidden');
+  }
+  function shutSheet() {
+    dexSheet = false;
+    const s = $('dex-sheet');
+    if (s) s.classList.add('hidden');
+  }
+
+  function init() {
+    const ICON = { play: 'ball', dex: 'book', upgrades: 'up', shop: 'shop', bag: 'bag', hatch: 'ball', gacha: 'ball4', goals: 'medal3', friends: 'friends', rank: 'trophy', settings: 'gear' };
+    document.querySelectorAll('#scr-menu [data-go]').forEach(b => {
+      if (b.dataset.go !== 'play') b.insertAdjacentHTML('afterbegin', `<span class="mi-ico">${G.Icons.html(ICON[b.dataset.go], 22)}</span>`);
+      b.dataset.sfx = b.dataset.go === 'play' ? 'confirm' : 'click';
+      b.onclick = () => {
+        closeSetup();
+        const go = b.dataset.go;
+        if (go === 'play') {
+          if (G.Social.room) G.LobbyUI.open();
+          else G.Flow.play();
+        }
+        else if (go === 'dex') openDex();
+        else if (go === 'upgrades') openUpgrades();
+        else if (go === 'shop') G.ShopUI.open();
+        else if (go === 'bag') G.ShopUI.openBag();
+        else if (go === 'hatch') G.Hatch.open();
+        else if (go === 'gacha') G.GachaUI.open();
+        else if (go === 'goals') G.GoalsUI.open();
+        else if (go === 'friends') G.FriendsUI.open();
+        else if (go === 'rank') G.RankingUI.open();
+        else if (go === 'settings') G.SettingsUI.open();
+      };
+    });
+    document.querySelectorAll('#scr-menu [data-setup]').forEach(b => {
+      b.onclick = () => { G.Audio.sfx('click'); openSetup(b.dataset.setup); };
+    });
+    const setupX = $('setup-pop-x');
+    if (setupX) setupX.onclick = () => { G.Audio.sfx('click'); closeSetup(); };
+    const modeHead = document.querySelector('#scr-menu .menu-modes .menu-head .mi-ico');
+    const roomHead = document.querySelector('#scr-menu .menu-room .menu-head .mi-ico');
+    if (modeHead) modeHead.innerHTML = G.Icons.html('ball', 18);
+    if (roomHead) roomHead.innerHTML = G.Icons.html('friends', 18);
+    document.querySelectorAll('#dex-tabs button').forEach(b => {
+      b.onclick = () => { G.Audio.sfx('select'); setDexTab(b.dataset.dexTab); };
+    });
+    const dclose = $('dex-drawer-close');
+    if (dclose) dclose.onclick = shutDrawer;
+    const sclose = $('dex-sheet-close');
+    if (sclose) sclose.onclick = shutSheet;
+    document.querySelectorAll('[data-back]').forEach(b => { b.onclick = open; });
+    $('menu-code').onsubmit = e => { e.preventDefault(); joinByCode($('menu-code-in').value); };
+    $('menu-code-new').onclick = () => G.SocialUI.withNick(async () => {
+      $('menu-code-msg').textContent = '';
+      $('menu-code-new').disabled = true;
+      try {
+        await G.Social.createRoom();
+        G.Audio.sfx('confirm');
+        G.LobbyUI.open();
+      } catch (e) {
+        $('menu-code-msg').textContent = 'No se pudo crear la sala.';
+        G.Audio.sfx('error');
+      }
+      $('menu-code-new').disabled = false;
+    });
+    G.Social.on(() => { if (G.UI.isOpen('scr-menu')) socialLine(); });
+    $('btn-logout').onclick = () => {
+      if (G.DB.guest && !confirm('Eres invitado: se perderá todo el progreso. ¿Salir?')) return;
+      G.Audio.music(null);
+      G.DB.logout().then(() => G.Flow.toLogin());
+    };
+  }
+
+  // ---------------- menú principal ----------------
+
+  const MODE_ART = { normal: [25, false], shiny: [6, true], boss: [150, false], siege: [68, false], endless: [133, false] };
+  let modeArtReady = null;
+  function ensureModeArt() {
+    if (!modeArtReady) modeArtReady = Promise.all([
+      G.Sprites.preload([25, 6, 150, 68, 133], 8000, false),
+      G.Sprites.preload([6], 8000, true)
+    ]);
+    return modeArtReady;
+  }
+  /** Iconos del modo: sprites reales, y el cachorro es el dibujo de 小柯. */
+  function paintModeIcons(root) {
+    if (!root) return;
+    root.querySelectorAll('[data-mode-ico]').forEach(slot => {
+      const id = slot.dataset.modeIco;
+      slot.replaceChildren();
+      if (id === 'castle' || id === 'castle20') {
+        const img = document.createElement('img');
+        img.className = 'pix';
+        img.alt = '';
+        img.src = 'assets/mode-castle.png';
+        slot.appendChild(img);
+        return;
+      }
+      const art = MODE_ART[id];
+      if (!art) return;
+      const cv = document.createElement('canvas');
+      cv.width = 88; cv.height = 80;
+      slot.appendChild(cv);
+      const [dex, shiny] = art;
+      const meta = G.Sprites.animMeta(dex, 'Idle', shiny);
+      const ay = meta ? meta.ay : 24;
+      const a = new G.Sprites.Animator(dex, (cv.height * 0.86) / (ay * G.Sprites.PX), shiny);
+      a.loop('Idle');
+      const ctx = cv.getContext('2d');
+      ctx.imageSmoothingEnabled = false;
+      a.draw(ctx, cv.width / 2, cv.height * 0.94);
+    });
+  }
+
+  const DIFFS = [
+    ['normal', 'Corriente', 'ball', 'La partida de siempre.'],
+    ['hard', 'Difícil', 'ball2', 'Más élites y salen más dispersos.'],
+    ['challenge', 'Reto', 'ball4', 'El élite trae una dote y el jefe un ataque más.'],
+    ['nightmare', 'Pesadilla', 'ball3', 'Más dotes, el suelo se agrieta y curas menos.']
+  ];
+  const MODE_LINE = {
+    normal: 'Hordas, jefes y experiencia.',
+    shiny: 'Sólo ves Pokémon shiny.',
+    boss: 'Tres jefes a la vez. Empiezas en el nivel 20.',
+    castle: 'Cincuenta oleadas. Protege al cachorro.',
+    castle20: 'Veinte oleadas. Cachorro rápido.',
+    siege: 'Gana el último castillo en pie.',
+    endless: 'No acaba. Cada oleada cambia el peligro.'
+  };
+  const TERRAIN = {
+    forest: 'Bosque', ruins: 'Ruinas', river: 'Río', ridge: 'Nieve',
+    city: 'Ciudad', garden: 'Jardín', coast: 'Costa', moor: 'Pradera', crater: 'Meseta'
+  };
+  let setupKind = null;
+  function soloDiff() {
+    const v = G.Settings.get('soloDiff');
+    return DIFFS.some(d => d[0] === v) ? v : 'normal';
+  }
+  function mapChoice() {
+    const v = G.Settings.get('region');
+    return v === 'random' || !G.Regions.get(v) ? 'random' : v;
+  }
+  function mapLabel(id) {
+    if (id === 'random') return G.T('Al azar');
+    const p = G.Regions.get(id);
+    return p ? p.name.split(' ')[0] : G.T('Al azar');
+  }
+  function closeSetup() {
+    setupKind = null;
+    const pop = $('setup-pop');
+    if (pop) pop.classList.add('hidden');
+    document.querySelectorAll('#scr-menu .setup-row').forEach(b => b.classList.remove('on'));
+  }
+  function fillSetup() {
+    const mode = G.Settings.get('runMode') || 'normal';
+    const map = mapChoice();
+    const diff = DIFFS.find(d => d[0] === soloDiff());
+    const pvp = mode === 'siege';
+    const diffRow = document.querySelector('#scr-menu [data-setup=diff]');
+    if (diffRow) diffRow.classList.toggle('hidden', pvp);
+    if (pvp && setupKind === 'diff') closeSetup();
+    const modeEl = $('setup-mode-v');
+    const mapEl = $('setup-map-v');
+    const diffEl = $('setup-diff-v');
+    if (modeEl) modeEl.textContent = G.T(G.Modes.row(mode)[1]);
+    if (mapEl) mapEl.textContent = mapLabel(map);
+    if (diffEl) diffEl.textContent = G.T(diff[1]);
+    const ico = document.querySelector('#scr-menu [data-setup=mode] .mode-ico');
+    if (ico) { ico.dataset.modeIco = mode; paintModeIcons(ico.parentElement); }
+    const ball = document.querySelector('#scr-menu .setup-ball');
+    if (ball) ball.innerHTML = G.Icons.html(diff[2], 22);
+    const thumb = $('setup-map-thumb');
+    if (thumb) {
+      if (map === 'random') {
+        thumb.width = 48; thumb.height = 28;
+        const ctx = thumb.getContext('2d');
+        ctx.fillStyle = '#102040'; ctx.fillRect(0, 0, 48, 28);
+        ctx.fillStyle = '#ffe08a'; ctx.font = '700 18px Pixelify,sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('?', 24, 15);
+      } else if (G.RegionUI && G.RegionUI.paint) G.RegionUI.paint(thumb, G.Regions.get(map));
+    }
+    const sum = $('menu-sum');
+    if (sum && modeEl && mapEl) {
+      sum.textContent = pvp
+        ? modeEl.textContent + ' · ' + mapEl.textContent
+        : modeEl.textContent + ' · ' + mapEl.textContent + ' · ' + (diffEl ? diffEl.textContent : '');
+    }
+    ensureModeArt().then(() => { if (G.UI.isOpen('scr-menu')) paintModeIcons(document.querySelector('#scr-menu [data-setup=mode]')); });
+  }
+  function openSetup(kind) {
+    const pop = $('setup-pop');
+    if (!pop) return;
+    if (kind === 'diff' && (G.Settings.get('runMode') || 'normal') === 'siege') return;
+    if (setupKind === kind) { closeSetup(); return; }
+    setupKind = kind;
+    pop.classList.remove('hidden');
+    document.querySelectorAll('#scr-menu .setup-row').forEach(b => b.classList.toggle('on', b.dataset.setup === kind));
+    $('setup-pop-title').textContent = kind === 'mode' ? 'Elegir modo' : kind === 'map' ? 'Elegir mapa' : 'Elegir dificultad';
+    const body = $('setup-pop-body');
+    body.className = 'selection-grid';
+    body.replaceChildren();
+    if (kind === 'mode') {
+      const cur = G.Settings.get('runMode') || 'normal';
+      for (const [id, label] of G.Modes.LIST) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pick-card' + (id === cur ? ' on' : '');
+        b.innerHTML = `<span class="mode-ico" data-mode-ico="${id}"></span><b></b><small></small>`;
+        b.querySelector('b').textContent = label;
+        b.querySelector('small').textContent = MODE_LINE[id] || '';
+        b.onclick = () => {
+          G.Settings.set('runMode', id);
+          if (G.Social.room && G.Social.room.isHost) G.Social.pushRules();
+          G.Audio.sfx('click');
+          closeSetup();
+          open();
+        };
+        body.appendChild(b);
+      }
+      paintModeIcons(body);
+      ensureModeArt().then(() => { if (setupKind === 'mode') paintModeIcons(body); });
+    } else if (kind === 'map') {
+      const cur = mapChoice();
+      const cards = [['random', null]].concat(G.Regions.list.map(p => [p.id, p]));
+      for (const [id, region] of cards) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pick-card' + (id === cur ? ' on' : '');
+        const name = document.createElement('b');
+        if (id === 'random') {
+          b.innerHTML = '<span class="qmark">?</span>';
+          name.textContent = 'Al azar';
+          const tag = document.createElement('small');
+          tag.textContent = 'Cualquier terreno';
+          b.appendChild(name);
+          b.appendChild(tag);
+        } else {
+          name.setAttribute('translate', 'no');
+          name.textContent = mapLabel(id);
+          const cv = document.createElement('canvas');
+          b.appendChild(cv);
+          if (G.RegionUI && G.RegionUI.paint) G.RegionUI.paint(cv, region);
+          const tag = document.createElement('small');
+          tag.textContent = TERRAIN[region.layout] || region.layout;
+          b.appendChild(name);
+          b.appendChild(tag);
+        }
+        b.onclick = () => {
+          G.Settings.set('region', id);
+          G.Audio.sfx('click');
+          closeSetup();
+          open();
+        };
+        body.appendChild(b);
+      }
+    } else {
+      const cur = soloDiff();
+      for (const [id, label, icon, line] of DIFFS) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'pick-card' + (id === cur ? ' on' : '');
+        b.innerHTML = G.Icons.html(icon, 28) + '<b></b><small></small>';
+        b.querySelector('b').textContent = label;
+        b.querySelector('small').textContent = line;
+        b.onclick = () => {
+          G.Settings.set('soloDiff', id);
+          G.Audio.sfx('click');
+          closeSetup();
+          open();
+        };
+        body.appendChild(b);
+      }
+      const note = document.createElement('p');
+      note.className = 'setup-note';
+      note.textContent = 'Difícil: vida ×1,15, daño ×1,08, salen ×1,15 y curas ×0,85. Reto: ×1,35, ×1,15, ×1,25 y ×0,70. Pesadilla: ×1,60, ×1,25, ×1,35 y ×0,55. Corriente no cambia. El asedio no usa esta dificultad.';
+      body.appendChild(note);
+    }
+  }
+
+  function open() {
+    const s = G.DB.save;
+    const mon = G.DEX_BY[s.partner];
+    const shiny = !!s.partnerShiny && G.DB.ownsShiny(mon.dex);
+    G.UI.chrome(true);
+    G.UI.show('scr-menu');
+    bagLine();
+    G.UI.sprite($('menu-partner'), mon.dex, { lively: true, scale: 4, hero: true, shiny });
+    $('menu-partner').style.setProperty('--stage-c', shiny ? '#9ae6ff' : G.U.TYPE_COLOR[mon.types[0]]);
+    $('menu-partner').classList.toggle('shiny', shiny);
+    $('menu-partner-name').innerHTML = mon.name + (shiny ? ' ' + G.Icons.html('shiny', 24) : '');
+    $('menu-partner-info').innerHTML = G.UI.typeChips(mon.types) + ' ' + G.UI.stars(mon.rarity);
+    // Normal / shiny a mano, aquí mismo (en el móvil no se encontraba en la ficha).
+    const seg = $('menu-shiny');
+    seg.classList.toggle('hidden', !G.DB.ownsShiny(mon.dex));
+    seg.lastChild.innerHTML = G.Icons.html('shiny', 12) + ' Shiny';
+    seg.querySelectorAll('button').forEach(b => {
+      b.classList.toggle('on', (b.dataset.v === '1') === shiny);
+      b.onclick = () => {
+        if ((b.dataset.v === '1') === shiny) return;
+        s.partnerShiny = b.dataset.v === '1';
+        G.DB.commit();
+        G.Audio.sfx('confirm');
+        open();
+      };
+    });
+
+    const owned = Object.keys(s.owned).filter(d => G.DEX_BY[d]).length;
+    const shinies = Object.keys(s.shiny || {}).length;
+    $('menu-dex-count').textContent = `${owned} / ${G.DEX.length}` + (shinies ? ` · ${shinies} shiny` : '');
+
+    const st = s.stats;
+    $('menu-stats').innerHTML =
+      `Runs <b style="color:#fff">${st.runs}</b> · Mejor tiempo <b style="color:#fff">${G.U.mmss(st.bestTime)}</b><br>` +
+      `Mejor nivel <b style="color:#fff">${st.bestLevel}</b> · Derrotados <b style="color:#fff">${st.totalKills.toLocaleString(G.I18n.locale)}</b>` +
+      (G.DB.guest ? '<br><span style="color:#ffb0b8">Modo invitado: no se guarda</span>' : '');
+
+    socialLine();
+    fillSetup();
+    // Premios de misiones por recoger.
+    G.Progress.checkAch();
+    const pend = G.Progress.pending();
+    $('menu-goals-sub').textContent = pend ? pend + (pend === 1 ? ' premio por recoger' : ' premios por recoger') : 'Misiones, logros y perfil';
+    $('menu-goals-sub').classList.toggle('gold', pend > 0);
+    const goalBtn = document.querySelector('#scr-menu [data-go=goals]');
+    if (goalBtn) goalBtn.classList.toggle('alert', pend > 0);
+    // Con cuenta en la nube: amigos en línea, invitaciones y (una vez) el apodo.
+    if (G.DB.online && !G.Social.started) {
+      G.Social.start().then(r => {
+        if (r === 'need-nick' && !G.NickUI.skipped && G.UI.isOpen('scr-menu')) G.NickUI.open();
+        socialLine();
+      });
+    }
+    G.InvitePop.refresh();
+  }
+
+  function joinByCode(raw) {
+    G.SocialUI.withNick(async () => {
+      const code = G.Social.cleanCode(raw);
+      const msg = $('menu-code-msg');
+      if (code.length !== 6) {
+        msg.textContent = 'El código tiene 6 caracteres.';
+        G.Audio.sfx('error');
+        return;
+      }
+      msg.textContent = '';
+      const btn = $('menu-code').querySelector('button[type=submit]');
+      btn.disabled = true;
+      const r = await G.Social.joinRoom(code);
+      btn.disabled = false;
+      if (!r.ok) { msg.textContent = r.error; G.Audio.sfx('error'); return; }
+      G.Audio.sfx('confirm');
+      G.LobbyUI.open();
+    });
+  }
+
+  /** Texto bajo "Mochila": cuántos objetos y MT llevas. */
+  function bagLine() {
+    const el = $('menu-bag-sub');
+    if (!el) return;
+    const s = G.DB.save, sum = o => Object.values(o || {}).reduce((a, b) => a + (+b || 0), 0);
+    const items = sum(s.bag), tms = sum(s.tms);
+    const iris = G.Gacha && G.Gacha.hasIris ? G.Gacha.BANNERS.filter(b => G.Gacha.hasIris(s, b.gen)).length : 0;
+    const parts = [];
+    if (items || tms) parts.push(G.I18n.f('Objetos: {x} · MT: {x}', items, tms));
+    if (iris) parts.push(G.I18n.f('Amuletos Iris: {x}', iris));
+    el.textContent = parts.join(' · ') || G.T('Vacía');
+  }
+
+  /** Texto bajo "Amigos" y "Jugar": quién está en línea, solicitudes, sala. */
+  function socialLine() {
+    const room = G.Social.room;
+    const play = document.querySelector('#scr-menu [data-go=play]');
+    if (play) play.textContent = room ? ('Volver a tu sala (' + room.members.length + '/' + (room.cap || G.Coop.rulesFromSettings().cap) + ')') : 'Jugar';
+    const fr = G.Social.friends;
+    const req = fr.filter(f => f.status === 'in').length;
+    const parts = [];
+    if (req) parts.push(req + (req === 1 ? ' solicitud' : ' solicitudes'));
+    const frSub = $('menu-friends-sub');
+    if (frSub) {
+      frSub.textContent = parts.length ? parts.join(' · ') : 'Juega en grupo, de 1 a 10';
+      frSub.classList.toggle('gold', req > 0);
+    }
+    const frBtn = document.querySelector('#scr-menu [data-go=friends]');
+    if (frBtn) frBtn.classList.toggle('alert', req > 0);
+  }
+
+  // ---------------- colección ----------------
+
+  function openDex() {
+    G.UI.show('scr-dex', true);
+    const s = G.DB.save;
+    if (dexSel == null || !G.DEX_BY[dexSel]) { dexSel = s.partner; dexGen = G.DEX_BY[s.partner].gen; }
+    if (!dexGen) dexGen = G.DEX_BY[s.partner].gen || 1;
+    const owned = Object.keys(s.owned).filter(d => G.DEX_BY[d]).length;
+    $('dex-total').textContent = `${owned} / ${G.DEX.length}`;
+
+    const tabs = $('dex-gens');
+    tabs.innerHTML = '';
+    GEN_LABEL.forEach((name, i) => {
+      const g = i + 1;
+      const list = G.DEX.filter(p => p.gen === g);
+      const have = list.filter(p => s.owned[p.dex]).length;
+      const b = document.createElement('button');
+      b.className = 'gen-tab' + (g === dexGen ? ' on' : '');
+      b.innerHTML = `<b translate="no">${name}</b><small>${have}/${list.length}</small>`;
+      b.onclick = () => { dexGen = g; dexF.q = ''; openDex(); };
+      tabs.appendChild(b);
+    });
+
+    // Tengo / me faltan (uno), rarezas (las que quieras), shiny y favoritos.
+    const fb = $('dex-filters');
+    fb.innerHTML = '';
+    const chip = (html, on, fn) => {
+      const c = document.createElement('button');
+      c.className = 'chip' + (on ? ' on' : '');
+      c.innerHTML = html;
+      c.onclick = () => { fn(); openDex(); };
+      fb.appendChild(c);
+    };
+    for (const [k, label] of [['all', 'Todos'], ['own', 'Tengo'], ['miss', 'Me faltan']]) chip(label, dexF.status === k, () => { dexF.status = k; });
+    chip(G.Icons.html('shiny', 12) + ' Shiny', dexF.shiny, () => { dexF.shiny = !dexF.shiny; });
+    chip(G.Icons.html('star', 12) + ' Favoritos', dexF.fav, () => { dexF.fav = !dexF.fav; });
+    for (const r of [5, 4, 3, 2, 1]) {
+      chip(G.Icons.rarity(r, 12) + ' ' + G.Gacha.RARITY_NAME[r], dexF.rar.has(r), () => { dexF.rar.has(r) ? dexF.rar.delete(r) : dexF.rar.add(r); });
+    }
+
+    const q = $('dex-q');
+    if (q.value !== dexF.q) q.value = dexF.q;
+    q.oninput = () => {
+      clearTimeout(qT);
+      qT = setTimeout(() => {
+        dexF.q = q.value; renderGrid();
+        $('dex-gens').querySelectorAll('.gen-tab').forEach((b, i) => b.classList.toggle('on', i + 1 === dexGen));
+      }, 150);
+    };
+    q.onkeydown = e => { if (e.key === 'Escape') { e.stopPropagation(); q.blur(); } };
+    $('dex-clear').onclick = () => { dexF = DEX0(); openDex(); };
+    renderGrid();
+    if (dexSel != null) showDetail(dexSel);
+    setDexTab(dexTab);
+  }
+
+  function setDexTab(tab) {
+    dexTab = tab || 'col';
+    for (const id of ['col', 'res', 'mas']) {
+      const pane = $('dex-' + id);
+      if (pane) pane.classList.toggle('hidden', id !== dexTab);
+    }
+    document.querySelectorAll('#dex-tabs button').forEach(b => b.classList.toggle('on', b.dataset.dexTab === dexTab));
+    const scr = $('scr-dex');
+    if (scr) scr.classList.toggle('side-off', dexTab !== 'col');
+    if (dexTab !== 'col') { shutDrawer(); shutSheet(); }
+    if (dexTab === 'res') renderResearch();
+    if (dexTab === 'mas') renderMastery();
+  }
+
+  function starGlyph(n) {
+    const on = Math.max(0, Math.min(4, n | 0));
+    return `<i>${'★'.repeat(on)}</i>${'☆'.repeat(4 - on)}`;
+  }
+
+  function renderResearch() {
+    const host = $('dex-res');
+    if (!host || !G.Research) return;
+    const scroll = $('res-grid');
+    const keep = scroll ? scroll.scrollTop : 0;
+    const region = (G.DEX || []).filter(p => p.gen === dexGen);
+    const list = region.filter(p => {
+      const own = G.DB.owns(p.dex);
+      if (resOwn === 'own' && !own) return false;
+      if (resOwn === 'miss' && own) return false;
+      if (resShiny && !G.DB.ownsShiny(p.dex)) return false;
+      return true;
+    });
+    let researched = 0, caught = 0;
+    for (const p of region) {
+      if (G.DB.owns(p.dex)) caught++;
+      if (Math.floor(G.Research.view(p.dex).t / 100) >= 1) researched++;
+    }
+    const gens = [1, 2, 3, 4, 5, 6, 7, 8, 9].map(g =>
+      `<button type="button" class="gen-tab${g === dexGen ? ' on' : ''}" data-rg="${g}"><b translate="no">${GEN_LABEL[g - 1]}</b></button>`).join('');
+    const cells = list.map(p => {
+      const v = G.Research.view(p.dex);
+      const done = Math.floor(v.t / 100) >= 1;
+      const badge = v.frags > 0 ? `<span class="res-x">×${v.frags}</span>` : '';
+      return `<button type="button" class="cell res-cell${p.dex === resSel ? ' on' : ''}${done ? '' : ' locked'}" data-pick="${p.dex}">
+        <canvas data-dex="${p.dex}" data-done="${done ? 1 : 0}" width="64" height="64"></canvas>
+        ${badge}
+        <b>${p.name}</b>
+        <span class="res-bar"><i style="width:${Math.max(0, Math.min(100, v.pct)).toFixed(1)}%"></i></span>
+      </button>`;
+    }).join('');
+    const sel = resSel && G.DEX_BY[resSel] && G.DEX_BY[resSel].gen === dexGen ? G.DEX_BY[resSel] : null;
+    let detail = '';
+    if (sel) {
+      const v = G.Research.view(sel.dex);
+      const pct = (Math.round(v.pct * 10) / 10).toString().replace(/\.0$/, '');
+      const where = GEN_LABEL[sel.gen - 1];
+      const line = sel.rarity >= 5
+        ? 'Solo aparece en grietas. Cada derrota suma un 34 %.'
+        : G.I18n.f('Aparece como enemigo en {x}. Derrota {x} veces para completar la investigación.', '\uE000', G.Research.need(sel.rarity))
+            .split('\uE000').join(`<span translate="no">${where}</span>`);
+      const can = v.frags >= 2 && v.stars < 4;
+      detail = `<div class="res-detail">
+        <button type="button" class="res-close" id="res-close">×</button>
+        <div class="res-detail-body"><div class="res-detail-art" aria-label="${sel.name}"><canvas id="res-detail-sprite" width="180" height="144"></canvas></div>
+        <div class="res-detail-copy">
+          <b>${sel.name}</b>
+          <div>${G.I18n.f('Investigación {x}% · Derrotas {x}', pct, v.k)}</div>
+          <p>${line}</p>
+          <p>${G.I18n.f('Fragmentos: {x}', v.frags)} · <span class="dex-stars">${starGlyph(v.stars)}</span> ${v.stars}/4</p>
+          <p>${starBuffLine(v.stars)}</p>
+          <button type="button" class="btn" id="res-star" ${can ? '' : 'disabled'}>Usar dos fragmentos</button>
+        </div></div>
+      </div>`;
+    }
+    host.innerHTML = `
+      <div class="gen-tabs">${gens}</div>
+      <div class="filters">
+        <button type="button" class="chip${resOwn === 'all' && !resShiny ? ' on' : ''}" data-ro="all">Todos</button>
+        <button type="button" class="chip${resOwn === 'own' ? ' on' : ''}" data-ro="own">Poseídos</button>
+        <button type="button" class="chip${resOwn === 'miss' ? ' on' : ''}" data-ro="miss">No poseídos</button>
+        <button type="button" class="chip${resShiny ? ' on' : ''}" data-ro="shiny">Shiny</button>
+      </div>
+      <div id="res-grid" class="grid">${cells || '<p class="empty">Nada por aquí.</p>'}</div>
+      <p class="res-foot"><span translate="no">${GEN_LABEL[dexGen - 1]}</span>：${G.I18n.f('Investigado {x}/{x} · Conseguidos {x}/{x}', researched, region.length, caught, region.length)}</p>
+      ${detail}`;
+    host.querySelectorAll('canvas[data-dex]').forEach(cv => G.UI.sprite(cv, +cv.dataset.dex, { scale: 1, silhouette: cv.dataset.done !== '1', ink: cv.dataset.done !== '1' }));
+    const portrait = $('res-detail-sprite');
+    if (portrait && sel) G.UI.sprite(portrait, sel.dex, { scale: 3, lively: true, hero: true, shadow: true });
+    const grid = $('res-grid');
+    if (grid) grid.scrollTop = keep;
+    host.querySelectorAll('[data-rg]').forEach(b => b.onclick = () => { dexGen = +b.dataset.rg; resSel = null; renderResearch(); });
+    host.querySelectorAll('[data-ro]').forEach(b => b.onclick = () => {
+      const k = b.dataset.ro;
+      if (k === 'shiny') resShiny = !resShiny;
+      else { resOwn = k; resShiny = false; }
+      renderResearch();
+    });
+    host.querySelectorAll('[data-pick]').forEach(b => b.onclick = () => { resSel = +b.dataset.pick; renderResearch(); });
+    const close = $('res-close');
+    if (close) close.onclick = () => { resSel = null; renderResearch(); };
+    const star = $('res-star');
+    if (star) star.onclick = () => { if (resSel && G.Research.raise(resSel)) renderResearch(); };
+  }
+
+  function renderMastery() {
+    const host = $('dex-mas');
+    if (!host || !G.Mastery) return;
+    const save = G.DB.save;
+    const rows = Object.keys(save.pmas || {}).map(d => ({ dex: +d, m: save.pmas[d], p: G.DEX_BY[d] })).filter(x => x.p);
+    rows.sort((a, b) => G.Mastery.points(b.m) - G.Mastery.points(a.m) || a.dex - b.dex);
+    const counts = { bronze: 0, silver: 0, gold: 0, diamond: 0 };
+    for (const row of rows) { const id = G.Mastery.rankId(row.m); if (id) counts[id]++; }
+    host.replaceChildren();
+    const sum = document.createElement('p');
+    sum.className = 'sub mas-sum';
+    sum.textContent = G.I18n.f('Especies usadas: {x} · Bronce {x} · Plata {x} · Oro {x} · Diamante {x}', rows.length, counts.bronze, counts.silver, counts.gold, counts.diamond);
+    const rule = document.createElement('p');
+    rule.className = 'sub mas-rule';
+    rule.textContent = 'Jugar con un compañero sube su maestría: 10 por partida, 1 por cada 100 derrotas, 5 por minuto de su mejor tiempo y 15 por evolución. Bronce 100, plata 400, oro 1200 y diamante 2000. Las placas no cambian la partida.';
+    host.append(sum, rule);
+    if (!rows.length) {
+      const empty = document.createElement('p');
+      empty.className = 'sub';
+      empty.textContent = 'Aún no has jugado con ningún compañero.';
+      host.append(empty);
+      return;
+    }
+    const list = document.createElement('div');
+    list.className = 'mas-list';
+    for (const row of rows) list.appendChild(masCard(row));
+    host.append(list);
+  }
+
+  function masCard(row) {
+    const pts = G.Mastery.points(row.m);
+    const next = G.Mastery.nextRank(pts);
+    const card = document.createElement('div');
+    card.className = 'mas-card';
+    const art = document.createElement('div');
+    art.appendChild(G.UI.spriteCanvas(row.dex, 72, 64, { scale: 2, shadow: true }));
+    const body = document.createElement('div');
+    const top = document.createElement('div');
+    top.className = 'mas-top';
+    const name = document.createElement('b');
+    name.textContent = row.p.name;
+    const prog = document.createElement('span');
+    prog.textContent = next
+      ? G.I18n.f('Hacia {x}: {x}/{x}', G.T(next.name), pts, next.at)
+      : G.I18n.f('Diamante · {x}', pts);
+    top.append(name, prog);
+    const bar = document.createElement('div');
+    bar.className = 'mas-bar';
+    const fill = document.createElement('i');
+    fill.style.width = (next ? Math.min(100, pts / next.at * 100) : 100) + '%';
+    bar.append(fill);
+    const meta = document.createElement('div');
+    meta.className = 'mas-meta';
+    meta.textContent = G.I18n.f('Partidas {x} · Derrotas {x} · Mejor {x} · Evoluciones {x}', row.m.r, row.m.k, G.Mastery.clock(row.m.b), row.m.e);
+    body.append(top, bar, meta);
+    card.append(art, body);
+    return card;
+  }
+
+  /** Lo que se ve con la generación, los filtros y el orden de ahora. */
+  function dexList() {
+    const s = G.DB.save, f = dexF;
+    const q = f.q.trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const num = /^#?\d+$/.test(q) ? +q.replace('#', '') : null;
+    const list = G.DEX.filter(p => {
+      const own = !!s.owned[p.dex];
+      if (q) {
+        // Por número, o por nombre (sin tildes); de los que no tienes no se busca el nombre.
+        if (num != null ? p.dex !== num : !(own && [p.name, G.T(p.name)].some(name => name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').includes(q)))) return false;
+      } else if (dexGen && p.gen !== dexGen) return false;
+      if (f.status === 'own' && !own) return false;
+      if (f.status === 'miss' && own) return false;
+      if (f.shiny && !(s.shiny && s.shiny[p.dex])) return false;
+      if (f.fav && !G.DB.isFav(p.dex)) return false;
+      if (f.rar.size && !f.rar.has(p.rarity)) return false;
+      if (f.type && !(own && p.types.includes(f.type))) return false;
+      return true;
+    });
+    const at = p => (s.owned[p.dex] && s.owned[p.dex].at) || 0, used = p => +(s.pused || {})[p.dex] || 0;
+    const by = { num: (a, b) => a.dex - b.dex, name: (a, b) => G.T(a.name).localeCompare(G.T(b.name), G.I18n.locale),
+                 rar: (a, b) => b.rarity - a.rarity || a.dex - b.dex, new: (a, b) => at(b) - at(a) || a.dex - b.dex,
+                 used: (a, b) => used(b) - used(a) || a.dex - b.dex }[f.sort];
+    // Los que no tienes no tienen nombre a la vista: al ordenar por nombre van al final.
+    if (f.sort === 'name') list.sort((a, b) => (!s.owned[a.dex]) - (!s.owned[b.dex]) || by(a, b)); else list.sort(by);
+    return list;
+  }
+
+  /*
+   * La rejilla se pinta por tandas de PAGE: con "Todas" son 966 Pokémon, cada
+   * uno con su animación y su hoja de sprites, y pintarlos de golpe paraba el
+   * juego (y la música) un segundo al borrar la búsqueda o cambiar el orden.
+   * Al acercarse al final de la lista se pinta la siguiente tanda.
+   * keep: volver a pintar los mismos que había (marcar un favorito no te
+   * devuelve arriba).
+   */
+  const PAGE = 48;
+  let qT = 0, gridList = [], gridShown = 0, gridIO = null;
+  function renderGrid(keep = false) {
+    const grid = $('dex-grid');
+    gridList = dexList();
+    const selAt = gridList.findIndex(p => p.dex === dexSel);
+    const want = keep ? Math.max(PAGE, gridShown) : Math.max(PAGE, selAt >= 0 ? selAt + 1 : PAGE);
+    const top = grid.scrollTop;
+    grid.innerHTML = '';
+    gridShown = 0;
+    const f = dexF, busy = f.q || f.status !== 'all' || f.shiny || f.fav || f.rar.size || f.type || f.sort !== 'num';
+    const count = $('dex-count');
+    if (count) count.textContent = gridList.length === 1 ? '1 Pokémon' : gridList.length + ' Pokémon';
+    $('dex-clear').classList.toggle('hidden', !busy);
+    if (!gridList.length) { grid.innerHTML = '<p class="sub" style="grid-column:1/-1">Ninguno con estos filtros.</p>'; return; }
+    moreCells(want);
+    if (keep) grid.scrollTop = top;
+    else {
+      const on = grid.querySelector('.cell.on');
+      if (on) on.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  function moreCells(n = PAGE) {
+    const grid = $('dex-grid');
+    const old = grid.querySelector('.dex-more');
+    if (old) { if (gridIO) gridIO.unobserve(old); old.remove(); }
+    const end = Math.min(gridList.length, gridShown + n);
+    for (let i = gridShown; i < end; i++) grid.appendChild(dexCell(gridList[i]));
+    gridShown = end;
+    if (gridShown >= gridList.length) return;
+    // Marca al final: cuando se acerca a la vista, la siguiente tanda.
+    const more = document.createElement('div');
+    more.className = 'dex-more';
+    grid.appendChild(more);
+    if (!('IntersectionObserver' in window)) { moreCells(gridList.length); return; }
+    gridIO = gridIO || new IntersectionObserver(es => { if (es.some(e => e.isIntersecting)) moreCells(); }, { rootMargin: '300px' });
+    gridIO.observe(more);
+  }
+
+  function dexCell(p) {
+    const s = G.DB.save;
+    const own = !!s.owned[p.dex], sh = !!(s.shiny && s.shiny[p.dex]);
+    const cell = document.createElement('div');
+    cell.className = 'cell' + (own ? '' : ' locked') + (p.dex === dexSel ? ' on' : '');
+    cell.dataset.pad = '1';
+    cell.insertAdjacentHTML('beforeend', `<span class="no">${String(p.dex).padStart(3, '0')}</span>`);
+    if (sh) cell.insertAdjacentHTML('beforeend', `<span class="badge-r" title="Tienes su shiny">${G.Icons.html('shiny', 12)}</span>`);
+    const useShiny = sh && p.dex === s.partner && s.partnerShiny;
+    cell.appendChild(G.UI.spriteCanvas(p.dex, 72, 64, { scale: 2, silhouette: !own, shadow: own, shiny: useShiny }));
+    const st = G.Research ? G.Research.view(p.dex).stars : 0;
+    cell.insertAdjacentHTML('beforeend', `<b>${own ? p.name : '???'}</b><span class="dex-stars">${starGlyph(st)}</span><span class="dex-ball">${G.UI.stars(p.rarity, 14)}</span>`);
+    cell.onclick = () => {
+      dexSel = p.dex;
+      $('dex-grid').querySelectorAll('.cell').forEach(c => c.classList.remove('on'));
+      cell.classList.add('on');
+      showDetail(p.dex);
+    };
+    return cell;
+  }
+
+  // Variante que se está viendo en la ficha (normal o shiny).
+  let viewShiny = false;
+
+  function starBuffLine(stars) {
+    const n = (stars | 0) * 3;
+    if (!n) return 'Cada estrella, como compañero: daño +3 % y PS máximos +3 %.';
+    return G.I18n.f('Como compañero: daño +{x} % y PS máximos +{x} %.', n, n);
+  }
+
+  function starBox(dex) {
+    const v = G.Research ? G.Research.view(dex) : { frags: 0, stars: 0 };
+    const can = v.frags >= 2 && v.stars < 4;
+    return `<p class="dex-copies">${G.I18n.f('Fragmentos: {x}', v.frags)}</p>
+      <div class="dex-starbox">
+        <div class="dex-starhead"><span>Estrellas</span><span class="dex-rank">${starGlyph(v.stars)} ${v.stars}/4</span></div>
+        <p class="sub dex-starbuff">${starBuffLine(v.stars)}</p>
+        <button id="dex-star" class="btn" type="button" ${can ? '' : 'disabled'}>Usar dos fragmentos</button>
+        <p class="sub">Dos fragmentos suben una estrella. Las estrellas son de esta especie.</p>
+      </div>`;
+  }
+
+  function showDetail(dex) {
+    const s = G.DB.save;
+    const p = G.DEX_BY[dex];
+    const own = !!s.owned[dex];
+    const hasSh = G.DB.ownsShiny(dex);
+    const isPartner = dex === s.partner;
+    if (!hasSh) viewShiny = false;
+    else if (isPartner && dex !== showDetail.last) viewShiny = !!s.partnerShiny;
+    if (dex !== showDetail.last) extraOpen = '';
+    // Al redibujar el mismo Pokémon (abrir el selector de Menta, enseñar una MT...)
+    // no se vuelve arriba: se quedaba fuera de la vista lo que acababas de abrir.
+    const sameMon = dex === showDetail.last, side = $('dex-side');
+    const keepScroll = sameMon && side ? side.scrollTop : 0;
+    showDetail.last = dex;
+
+    const max = { hp: 183, atk: 1.55, spd: 137, def: 160 };
+    // Con su naturaleza (20-10-2026): el stat que sube, en verde; el que baja, en rojo.
+    const nat = own ? G.Mons.natureOf(dex) : null, q = own ? G.Mons.monFor(dex) : p;
+    const natCls = k => (!nat ? '' : nat.up === k ? ' nat-up' : nat.down === k ? ' nat-down' : '');
+    const bar = (label, v, m, txt, k) =>
+      `<div class="stat${natCls(k)}"><span>${label}</span><div class="bar"><i style="width:${Math.min(100, v / m * 100)}%"></i></div><span>${txt}</span></div>`;
+    const usingThis = isPartner && (!hasSh || !!s.partnerShiny === viewShiny);
+
+    const box = $('dex-detail');
+    const num = String(p.dex).padStart(3, '0');
+    const mas = G.Mastery ? G.Mastery.row(dex) : null;
+    const masPts = mas ? G.Mastery.points(mas) : 0;
+    const masNext = G.Mastery ? G.Mastery.nextRank(masPts) : null;
+    const masTxt = !G.Mastery ? '' : masNext
+      ? G.I18n.f('Hacia {x}: {x}/{x}', G.T(masNext.name), masPts, masNext.at)
+      : G.I18n.f('Diamante · {x}', masPts);
+    box.innerHTML = `
+      <canvas id="dex-big" class="stage" width="220" height="190"></canvas>
+      ${hasSh ? `<div class="seg">
+          <button class="${viewShiny ? '' : 'on'}" data-v="0">Normal</button>
+          <button class="${viewShiny ? 'on' : ''}" data-v="1">${G.Icons.html('shiny', 12)} Shiny</button></div>` : ''}
+      <div class="center dex-id">
+        <div class="dex-no">${G.I18n.f('Nº {x}', num)} · <span translate="no">${GEN_LABEL[p.gen - 1]}</span></div>
+        <h3>${own ? p.name : '???'}</h3>
+        <div class="dex-types">${G.UI.stars(p.rarity, 16)}${own ? G.UI.typeChips(p.types) : ''}</div>
+      </div>`;
+    const rest = $('dex-rest');
+    if (rest) rest.innerHTML = own ? `
+        ${bar('Vida', q.hp, max.hp, q.hp)}
+        ${bar('Ataque', q.pa, max.atk, '×' + q.pa.toFixed(2), 'pa')}
+        ${bar('At. Esp.', q.sa, max.atk, '×' + q.sa.toFixed(2), 'sa')}
+        ${bar('Defensa', q.df, max.def, Math.round(q.df), 'df')}
+        ${bar('Def. Esp.', q.sd, max.def, Math.round(q.sd), 'sd')}
+        ${bar('Velocidad', q.spd, max.spd, Math.round(q.spd), 'spd')}
+        <p class="sub center" style="margin:6px 0 0">Pega mejor con ataques <b class="gold">${G.Stats.sideOf(q) === 'special' ? 'especiales' : 'físicos'}</b></p>
+        <p class="dex-move">Empieza con <b class="gold">${G.T(G.Moves.BY_ID[G.startMoveOf(dex)].name, 'move')}</b></p>
+        <p class="move-icons" title="Movimientos que puede aprender">
+          ${G.Moves.poolFor(p).map(id => `<span title="${G.T(G.Moves.BY_ID[id].name, 'move')}">${G.Icons.html('move:' + id, 16)}</span>`).join('')}</p>
+        ${usingThis
+          ? '<button class="btn gold grow" disabled>Es tu compañero</button>'
+          : `<button id="dex-pick" class="btn gold" data-sfx="confirm">${G.I18n.f('Elegir de compañero{x}', viewShiny ? ' (shiny)' : '')}</button>`}
+        ${starBox(dex)}
+        <p class="dex-masline"><span>Maestría</span> · ${masTxt}</p>
+        ${monExtras(dex)}
+      ` : `<p class="center" style="color:var(--muted)">Aún no lo tienes.<br>Consíguelo en el banner de <b class="gold">${GEN_NAMES[p.gen - 1]}</b>
+            o derrotándolo cuando salga shiny.</p>`;
+    const actions = $('dex-actions');
+    if (actions) actions.replaceChildren();
+    if (side) side.scrollTop = keepScroll;
+    $('dex-big').style.setProperty('--stage-c', !own ? '#5b83d6' : viewShiny ? '#9ae6ff' : G.U.TYPE_COLOR[p.types[0]]);
+    $('dex-big').classList.toggle('shiny', own && viewShiny);
+    G.UI.sprite($('dex-big'), dex, { lively: own, spin: own, silhouette: !own, scale: 3, hero: true, shiny: own && viewShiny });
+    box.querySelectorAll('.seg button').forEach(b => {
+      b.onclick = () => { viewShiny = b.dataset.v === '1'; showDetail(dex); };
+    });
+    const fav = $('dex-fav');
+    if (fav) fav.onclick = () => { G.DB.setFav(dex, !G.DB.isFav(dex)); renderGrid(true); showDetail(dex); };
+    const starBtn = $('dex-star');
+    if (starBtn) starBtn.onclick = () => { if (G.Research && G.Research.raise(dex)) showDetail(dex); };
+    const pick = $('dex-pick');
+    if (pick) pick.onclick = () => {
+      s.partner = dex;
+      s.partnerShiny = hasSh && viewShiny;
+      G.DB.commit();
+      G.UI.toast(p.name + (s.partnerShiny ? ' shiny' : '') + ' es ahora tu compañero');
+      renderGrid(true); showDetail(dex);
+    };
+    if (own) wireExtras(dex, rest || box);
+  }
+
+  // ---------------- naturaleza, habilidad y MT (Tienda Kecleon, 20-10-2026) ----------------
+  // Se ven en la ficha de cada Pokémon y aquí se usan la Menta, las Cápsulas y las MT de la Mochila.
+  const STAT_NAME = { pa: 'Ataque', sa: 'At. Esp.', df: 'Defensa', sd: 'Def. Esp.', spd: 'Velocidad' };
+  let extraOpen = '';          // 'nat' | 'cap' | 'caph' | 'tm' | '' (qué selector está abierto)
+  const natLine = n => (n.up ? `+${G.T(STAT_NAME[n.up])} −${G.T(STAT_NAME[n.down])}` : G.T('neutra'));
+
+  function monExtras(dex) {
+    const p = G.DEX_BY[dex], n = G.Mons.natureOf(dex), ab = G.Mons.abilityOf(dex);
+    const fx = G.AbilityFX.of(ab.id, p), taught = G.Mons.taught(dex);
+    const tmsHere = G.Mons.learnable(dex).filter(id => G.Shop.tmCount(id) > 0);
+    const btn = (key, icon, label, count) => count > 0
+      ? `<button class="btn small" data-extra="${key}">${G.Icons.html(icon, 14)} <span>${label}</span> <small>×${count}</small></button>` : '';
+    const capN = G.Mons.abilityChoices(dex, false).length ? G.Shop.count('cap') : 0;
+    const caphN = G.Mons.abilityChoices(dex, true).length ? G.Shop.count('caph') : 0;
+    return `<div class="mon-extra">
+      <div class="mx-row"><span>Naturaleza</span><b translate="no">${G.Mons.name(n.n)}</b><small>${natLine(n)}</small>
+        ${btn('nat', 'mint', 'Menta', G.Shop.count('mint'))}</div>
+      <div class="mx-row"><span>Habilidad</span><b translate="no">${G.Mons.abilityName(ab.id)}</b>${ab.slot === 2 ? `<small class="gold">${G.T('oculta')}</small>` : ''}
+        ${btn('cap', 'capsule', 'Cápsula', capN)}${btn('caph', 'capsuleh', 'Cápsula Oculta', caphN)}</div>
+      <p class="sub mx-desc"><span>${fx.d}</span>${fx.d2 ? ` <span>${fx.d2}</span>` : ''}</p>
+      <div class="mx-row"><span>MT</span>${taught.length
+        ? `<span class="move-icons">${taught.map(id => `<span title="${G.T(G.Moves.BY_ID[id].name, 'move')}">${G.Icons.html('move:' + id, 16)}</span>`).join('')}</span>`
+        : `<small>${G.T('Aún no ha aprendido ninguna')}</small>`}
+        ${btn('tm', 'tm', 'Enseñar MT', tmsHere.length)}</div>
+      <div id="mx-picker"></div>
+    </div>`;
+  }
+
+  function wireExtras(dex, box) {
+    box.querySelectorAll('[data-extra]').forEach(b => {
+      b.onclick = () => { extraOpen = extraOpen === b.dataset.extra ? '' : b.dataset.extra; G.Audio.sfx('select'); showDetail(dex); };
+    });
+    const host = box.querySelector('#mx-picker');
+    if (!host || !extraOpen) return;
+    const s = G.DB.save, mon = G.DEX_BY[dex];
+    const chips = (list, label, onPick) => {
+      host.innerHTML = `<div class="panel ban-picker"><div class="ban-moves">${list.map(x => `<button class="chip" data-v="${x.v}">${x.html}</button>`).join('')}</div></div>`;
+      host.querySelectorAll('[data-v]').forEach(c => { c.onclick = () => onPick(c.dataset.v); });
+    };
+    const done = msg => { extraOpen = ''; G.DB.commit(); G.Audio.sfx('buy'); G.UI.toast(msg, 2600); showDetail(dex); };
+    if (extraOpen === 'nat' && G.Shop.count('mint')) {
+      const cur = G.Mons.natureOf(dex).id;
+      chips(G.NATURES.filter(n => n.id !== cur).map(n => ({ v: n.id, html: `<b translate="no">${G.Mons.name(n.n)}</b> <small>${natLine(n)}</small>` })), '', id => {
+        if (!G.Shop.take('mint')) return;
+        G.Mons.setNature(dex, id);
+        done(G.I18n.f('{x} ahora tiene naturaleza {x}', mon.name, G.Mons.name(G.NATURE_BY[id].n)));
+      });
+    } else if ((extraOpen === 'cap' || extraOpen === 'caph') && G.Shop.count(extraOpen)) {
+      const l = G.Mons.slots(dex);
+      chips(G.Mons.abilityChoices(dex, extraOpen === 'caph').map(i => ({ v: i, html: `<b translate="no">${G.Mons.abilityName(l[i])}</b>${i === 2 ? ` <small class="gold">${G.T('oculta')}</small>` : ''}` })), '', v => {
+        if (!G.Shop.take(extraOpen)) return;
+        G.Mons.setAbility(dex, +v);
+        done(G.I18n.f('{x} ahora tiene la habilidad {x}', mon.name, G.Mons.abilityName(l[+v])));
+      });
+    } else if (extraOpen === 'tm') {
+      const list = G.Mons.learnable(dex).filter(id => G.Shop.tmCount(id) > 0);
+      chips(list.map(id => ({ v: id, html: `${G.Icons.html('move:' + id, 16)} ${G.T(G.Moves.BY_ID[id].name, 'move')} <small>×${G.Shop.tmCount(id)}</small>` })), '', id => {
+        if (!G.Mons.teach(dex, id)) return;
+        done(G.I18n.f('¡{x} ha aprendido {x}!', mon.name, G.T(G.Moves.BY_ID[id].name, 'move')));
+      });
+    }
+  }
+
+  // ---------------- mejoras ----------------
+
+  let upgDex = null, upgPartner = null;
+
+  function openUpgrades() {
+    G.UI.show('scr-upgrades', true);
+    const s = G.DB.save;
+    // Se recuerda el último que miraste, salvo que hayas cambiado de compañero: entonces se abre en el nuevo.
+    if (!upgDex || !s.owned[upgDex] || s.partner !== upgPartner) upgDex = s.partner;
+    upgPartner = s.partner;
+    // Selector con tus Pokémon: el compañero primero, luego los que ya tienen mejoras.
+    const sel = $('upg-mon');
+    const lv = d => Object.values(s.pupg[d] || {}).reduce((a, b) => a + b, 0);
+    const mons = Object.keys(s.owned).map(Number).filter(d => G.DEX_BY[d])
+      .sort((a, b) => (b === s.partner) - (a === s.partner) || lv(b) - lv(a) || a - b);
+    sel.innerHTML = mons.map(d => `<option value="${d}">${G.DEX_BY[d].name}${d === s.partner ? ' (compañero)' : ''}${lv(d) ? ' · ' + lv(d) + ' niveles' : ''}</option>`).join('');
+    sel.value = upgDex;
+    sel.onchange = () => { upgDex = +sel.value; G.Audio.sfx('select'); renderUpgrades(); };
+    renderUpgrades();
+  }
+
+  function renderUpgrades() {
+    const s = G.DB.save;
+    const levels = G.DB.upgradesOf(upgDex);
+    const mon = G.DEX_BY[upgDex];
+    const shiny = upgDex === s.partner && !!s.partnerShiny && G.DB.ownsShiny(upgDex);
+    G.UI.sprite($('upg-stage'), upgDex, { lively: true, scale: 2, hero: true, shiny });
+    $('upg-stage').style.setProperty('--stage-c', shiny ? '#9ae6ff' : G.U.TYPE_COLOR[mon.types[0]]);
+    const box = $('upg-list');
+    box.innerHTML = '';
+    for (const u of G.Upgrades.LIST) {
+      const lvl = levels[u.id] || 0;
+      const maxed = lvl >= u.max;
+      const unpriced = u.priced === false;
+      const cost = maxed || unpriced ? null : G.Upgrades.cost(u.id, lvl);
+      // Mejoras que necesitan otra (Segundo movimiento inicial → Repertorio).
+      const locked = !maxed && u.needs && !levels[u.needs];
+      const pick2 = u.id === 'start2' && lvl > 0 ? G.startMove2Of(upgDex) : null;
+      const el = document.createElement('div');
+      el.className = 'panel upg-item';
+      el.innerHTML = `
+        <div class="ic">${G.Icons.html(u.icon, 32)}</div>
+        <div>
+          <b>${u.name}</b> <span style="color:var(--muted);font-size:13px">${u.unit}</span>
+          <div class="pips">${Array.from({ length: u.max }, (_, i) => `<i class="${i < lvl ? 'on' : ''}"></i>`).join('')}</div>
+        </div>
+        <div class="upg-btns">
+          ${u.id === 'ban' && lvl > 0 ? `<button class="btn small" data-ban>Elegir (${banList().length}/${lvl})</button>` : ''}
+          ${u.id === 'seal' && lvl > 0 ? `<button class="btn small" data-seal>Elegir (${sealList().length}/${lvl})</button>` : ''}
+          ${u.id === 'start' && lvl > 0 ? `<button class="btn small" data-start>Elegir: ${G.Moves.BY_ID[G.startMoveOf(upgDex)].name}</button>` : ''}
+          ${u.id === 'start2' && lvl > 0 ? `<button class="btn small" data-start2>Elegir: ${pick2 ? G.Moves.BY_ID[pick2].name : G.T('Al azar')}</button>` : ''}
+          <button class="btn small ${maxed || unpriced ? '' : 'gold'}" data-buy data-sfx="none" ${maxed || locked || unpriced || cost == null || s.coins < cost ? 'disabled' : ''}
+            ${locked ? `title="${G.T('Primero compra Repertorio')}"` : ''}>
+          ${maxed ? 'Máx.' : unpriced ? G.T('Sin precio') : locked ? G.T('Necesita Repertorio') : `<span class="coin"></span> ${cost}`}</button></div>`;
+      if (u.id === 'ban' && lvl > 0) el.querySelector('[data-ban]').onclick = () => { banOpen = !banOpen; renderUpgrades(); };
+      if (u.id === 'seal' && lvl > 0) el.querySelector('[data-seal]').onclick = () => { sealOpen = !sealOpen; renderUpgrades(); };
+      if (u.id === 'start' && lvl > 0) el.querySelector('[data-start]').onclick = () => { startOpen = !startOpen; renderUpgrades(); };
+      if (u.id === 'start2' && lvl > 0) el.querySelector('[data-start2]').onclick = () => { start2Open = !start2Open; renderUpgrades(); };
+      el.querySelector('[data-buy]').onclick = () => {
+        // Se vuelve a leer todo al pulsar (la partida puede haber cambiado desde que se dibujó).
+        const sv = G.DB.save, lv = G.DB.upgradesOf(upgDex), now = lv[u.id] || 0;
+        if (now >= u.max || (u.needs && !lv[u.needs])) { renderUpgrades(); return; }
+        const price = G.Upgrades.cost(u.id, now);
+        if (price == null || sv.coins < price) { renderUpgrades(); return; }
+        sv.coins -= price;
+        lv[u.id] = now + 1;
+        G.DB.commit(true);
+        G.Audio.sfx('buy');
+        G.UI.refreshCoins();
+        G.UI.toast(`${mon.name} · ${u.name}: nivel ${now + 1}`);
+        renderUpgrades();
+      };
+      box.appendChild(el);
+      if (u.id === 'ban' && lvl > 0 && banOpen) box.appendChild(banPicker(lvl));
+      if (u.id === 'seal' && lvl > 0 && sealOpen) box.appendChild(sealPicker(lvl));
+      if (u.id === 'start' && lvl > 0 && startOpen) box.appendChild(startPicker());
+      if (u.id === 'start2' && lvl > 0 && start2Open) box.appendChild(start2Picker());
+    }
+    box.appendChild(bindPanel());
+  }
+
+  // ---------------- atajos: hueco fijo para cada movimiento ----------------
+  // save.pbind[dex] = [movimiento del hueco 1, del 2, del 3, del 4] (o null).
+  function bindPanel() {
+    const s = G.DB.save;
+    s.pbind = s.pbind || {};
+    const list = s.pbind[upgDex] || [null, null, null, null];
+    const mon = G.DEX_BY[upgDex];
+    const ids = G.Moves.poolFor(mon).concat([G.startMoveOf(upgDex)]).filter((v, i, a) => a.indexOf(v) === i)
+      .sort((a, b) => G.Moves.BY_ID[a].name.localeCompare(G.Moves.BY_ID[b].name, 'es'));
+    const el = document.createElement('div');
+    el.className = 'panel bind-panel';
+    el.innerHTML = `<b>Atajos de movimientos</b>
+      <p class="sub" style="margin:2px 0 8px">Elige qué movimiento va siempre en cada hueco (teclas 1-4 o los iconos de abajo), para la memoria muscular. Si aún no tienes tantos movimientos, va al hueco más cercano.</p>
+      <div class="bind-slots">${[0, 1, 2, 3].map(i => `<label class="bind-slot"><span>${i + 1}</span>
+        <select class="field" data-slot="${i}"><option value="">Libre</option>${ids.map(id =>
+          `<option value="${id}" ${list[i] === id ? 'selected' : ''}>${G.T(G.Moves.BY_ID[id].name, 'move')}</option>`).join('')}</select></label>`).join('')}</div>`;
+    el.querySelectorAll('select[data-slot]').forEach(sel => {
+      sel.onchange = () => {
+        const l = (s.pbind[upgDex] || [null, null, null, null]).slice(0, 4);
+        while (l.length < 4) l.push(null);
+        const i = +sel.dataset.slot, id = sel.value || null;
+        // Un movimiento sólo puede estar en un hueco.
+        for (let j = 0; j < 4; j++) if (id && l[j] === id) l[j] = null;
+        l[i] = id;
+        s.pbind[upgDex] = l;
+        G.DB.commit();
+        G.Audio.sfx('select');
+        renderUpgrades();
+      };
+    });
+    return el;
+  }
+
+  // ---------------- movimiento inicial (Mejoras → Movimiento inicial) ----------------
+  let startOpen = false;
+  function startPicker() {
+    const s = G.DB.save, cur = G.startMoveOf(upgDex), base = G.baseStartOf(upgDex);
+    const ids = G.startChoices(upgDex).sort((a, b) => G.Moves.BY_ID[a].name.localeCompare(G.Moves.BY_ID[b].name, 'es'));
+    const el = document.createElement('div');
+    el.className = 'panel ban-picker';
+    el.innerHTML = `<p class="sub" style="margin:0 0 8px">Elige con qué ataque empieza. Lo puedes cambiar cuando quieras, gratis.</p>
+      <div class="ban-moves">${ids.map(id => { const d = G.Moves.BY_ID[id];
+        return `<button class="chip ${id === cur ? 'on' : ''}" data-id="${id}">${G.Icons.html('move:' + id, 16)} ${d.name}${id === base ? ' <small>(de serie)</small>' : ''}</button>`; }).join('')}</div>`;
+    el.querySelectorAll('[data-id]').forEach(b => {
+      b.onclick = () => {
+        const id = b.dataset.id;
+        s.pstart = s.pstart || {};
+        if (id === base) delete s.pstart[upgDex]; else s.pstart[upgDex] = id;
+        // Si era el segundo inicial, el segundo vuelve a salir al azar.
+        if (s.pstart2 && s.pstart2[upgDex] === id) delete s.pstart2[upgDex];
+        // El inicial no puede estar vetado.
+        const l = banList(), i = l.indexOf(id);
+        if (i >= 0) l.splice(i, 1);
+        G.DB.commit();
+        G.Audio.sfx('select');
+        G.UI.toast(G.DEX_BY[upgDex].name + ' empezará con ' + G.Moves.BY_ID[id].name);
+        renderUpgrades();
+      };
+    });
+    return el;
+  }
+
+  // ---------------- segundo movimiento inicial (con Repertorio) ----------------
+  // save.pstart2[dex]; sin elegir (o "Al azar"), el segundo sale al azar como siempre.
+  let start2Open = false;
+  function start2Picker() {
+    const s = G.DB.save, cur = G.startMove2Of(upgDex), first = G.startMoveOf(upgDex);
+    const ids = G.startChoices(upgDex).filter(id => id !== first)
+      .sort((a, b) => G.Moves.BY_ID[a].name.localeCompare(G.Moves.BY_ID[b].name, 'es'));
+    const el = document.createElement('div');
+    el.className = 'panel ban-picker';
+    el.innerHTML = `<p class="sub" style="margin:0 0 8px">Elige el segundo ataque con el que empieza. Lo puedes cambiar cuando quieras, gratis.</p>
+      <div class="ban-moves"><button class="chip ${!cur ? 'on' : ''}" data-id="">${G.T('Al azar')}</button>${ids.map(id => { const d = G.Moves.BY_ID[id];
+        return `<button class="chip ${id === cur ? 'on' : ''}" data-id="${id}">${G.Icons.html('move:' + id, 16)} ${d.name}</button>`; }).join('')}</div>`;
+    el.querySelectorAll('[data-id]').forEach(b => {
+      b.onclick = () => {
+        const id = b.dataset.id;
+        s.pstart2 = s.pstart2 || {};
+        if (!id) delete s.pstart2[upgDex]; else s.pstart2[upgDex] = id;
+        // El elegido no puede estar vetado.
+        const l = banList(), i = id ? l.indexOf(id) : -1;
+        if (i >= 0) l.splice(i, 1);
+        G.DB.commit();
+        G.Audio.sfx('select');
+        G.UI.toast(id ? G.I18n.f('{x} empezará también con {x}', G.DEX_BY[upgDex].name, G.Moves.BY_ID[id].name)
+                      : G.T('El segundo ataque saldrá al azar'));
+        renderUpgrades();
+      };
+    });
+    return el;
+  }
+
+  // ---------------- veto: movimientos bloqueados ----------------
+  // Lista por Pokémon en save.pban[dex]; con N niveles de Veto, N movimientos.
+  let banOpen = false;
+  function banList() {
+    const s = G.DB.save;
+    s.pban = s.pban || {};
+    return s.pban[upgDex] || (s.pban[upgDex] = []);
+  }
+  function banPicker(max) {
+    const mon = G.DEX_BY[upgDex];
+    const start = G.startMoveOf(upgDex), start2 = G.startMove2Of(upgDex);
+    const ids = G.Moves.poolFor(mon).filter(id => id !== start && id !== start2)
+      .sort((a, b) => G.Moves.BY_ID[a].name.localeCompare(G.Moves.BY_ID[b].name, 'es'));
+    const list = banList();
+    const el = document.createElement('div');
+    el.className = 'panel ban-picker';
+    el.innerHTML = `<p class="sub" style="margin:0 0 8px">Toca los movimientos que no quieres que te salgan en las cartas (${list.length}/${max}). El movimiento de inicio no se puede vetar.</p>
+      <div class="ban-moves">${ids.map(id => { const d = G.Moves.BY_ID[id]; const on = list.includes(id);
+        return `<button class="chip ${on ? 'on ban' : ''}" data-id="${id}">${G.Icons.html('move:' + id, 16)} ${G.T(d.name, 'move')}${on ? ' ' + G.Icons.html('ban', 14) : ''}</button>`; }).join('')}</div>`;
+    el.querySelectorAll('[data-id]').forEach(b => {
+      b.onclick = () => {
+        const l = banList(), id = b.dataset.id, i = l.indexOf(id);
+        if (i >= 0) l.splice(i, 1);
+        else if (l.length >= max) { G.UI.toast('Ya tienes ' + max + ' vetados: quita uno primero'); return; }
+        else l.push(id);
+        G.DB.commit();
+        G.Audio.sfx('select');
+        renderUpgrades();
+      };
+    });
+    return el;
+  }
+
+  // ---------------- sellar: objetos que dejan de salir ----------------
+  // Lista por Pokémon en save.pseal[dex]; con N niveles de Sellar, N objetos.
+  let sealOpen = false;
+  function sealList() {
+    const s = G.DB.save;
+    s.pseal = s.pseal || {};
+    return s.pseal[upgDex] || (s.pseal[upgDex] = []);
+  }
+  function sealPicker(max) {
+    const ids = G.Items.LIST.map(i => i.id).sort((a, b) => G.Items.BY[a].name.localeCompare(G.Items.BY[b].name, 'es'));
+    const list = sealList();
+    const el = document.createElement('div');
+    el.className = 'panel ban-picker seal-picker';
+    el.innerHTML = `<p class="sub" style="margin:0 0 8px">Toca los objetos que no quieres que te salgan en las Poké Balls ni en el puesto.</p>
+      <div class="ban-moves">${ids.map(id => { const it = G.Items.BY[id]; const on = list.includes(id);
+        return `<button class="chip ${on ? 'on ban' : ''}" data-id="${id}">${G.Items.text(it, 'name')}${on ? ' ' + G.Icons.html('ban', 14) : ''}</button>`; }).join('')}</div>`;
+    el.querySelectorAll('[data-id]').forEach(b => {
+      b.onclick = () => {
+        const l = sealList(), id = b.dataset.id, i = l.indexOf(id);
+        if (i >= 0) l.splice(i, 1);
+        else if (l.length >= max) { G.UI.toast('Ya tienes ' + max + ' sellados: quita uno primero'); return; }
+        else l.push(id);
+        G.DB.commit();
+        G.Audio.sfx('select');
+        renderUpgrades();
+      };
+    });
+    return el;
+  }
+
+  return { init, open, openDex, GEN_NAMES, shutDrawer, shutSheet, closeSetup };
+})();

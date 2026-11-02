@@ -1,0 +1,812 @@
+/* ============ player.js — el Pokémon que controlas ============
+ * (x, y) son los PIES. Sólo UN movimiento está activo a la vez: se dispara
+ * solo y se cambia con 1-4 / Q / E. Cada disparo reproduce la animación de
+ * ataque de Mundo Misterioso que le toca (Attack, Shoot o Charge).
+ */
+G.Player = class Player {
+  /**
+   * @param mon   entrada de G.DEX
+   * @param perks mejoras permanentes ya resueltas (ver data/upgrades.js)
+   */
+  constructor(mon, perks = {}, shiny = false) {
+    this.mon = mon;
+    this.dex = mon.dex;
+    this.shiny = shiny && G.Sprites.hasShiny(mon.dex);
+    // Los grandes, algo más pequeños y con el choque de uno normal (ver sprites.js).
+    this.scale = G.Sprites.playerScale(mon.dex);
+    this.anim = new G.Sprites.Animator(mon.dex, this.scale, this.shiny);
+    this.x = 0; this.y = 0;
+    this.r = G.Sprites.playerRadius(mon.dex);
+    this.bodyH = G.Sprites.bodyHeight(mon.dex, this.scale);
+
+    this.atkMul = perks.atkMul || 1;
+    this.spdMul = perks.spdMul || 1;
+    this.cdMul = perks.cdMul || 1;
+    this.dmgReduce = perks.dmgReduce || 0;
+    this.regenFlat = perks.regen || 0;
+    this.magnet = 78 * (perks.magnetMul || 1);
+    this.xpMul = perks.xpMul || 1;
+    this.coinMul = perks.coinMul || 1;
+    this.armor = 0;
+    this.armorMul = 1;
+    this.luck = perks.luck || 0;
+    this.evade = 0;
+    this.healMul = 1;
+    this.ballCut = 0;
+
+    this.maxHp = mon.hp + (perks.hp || 0);
+    this.hp = this.maxHp;
+    this.baseSpd = mon.spd;
+    this.baseAtk = mon.atk;
+
+    this.moves = [];           // todos los movimientos aprendidos
+    this.slots = [];           // huecos: cada uno, una lista de movimientos que se lanzan a la vez
+    this.active = 0;           // hueco activo
+    this.maxMoves = 4;         // huecos
+    this.bonds = 0;            // vínculos por usar (premio de los legendarios)
+
+    // patk / satk: Danza Espada y Danza Dragón (físico) y Maquinación (especial).
+    this.buffs = {
+      atk: { n: 0, t: 0, amount: 0 },
+      patk: { n: 0, t: 0, amount: 0 },
+      satk: { n: 0, t: 0, amount: 0 },
+      spd: { n: 0, t: 0, amount: 0 },
+      def: { n: 0, t: 0, amount: 0 },
+      regen: { n: 0, t: 0, amount: 0 }
+    };
+
+    this.level = 1;
+    this.xp = 0;
+    this.xpNext = Player.xpFor(1);
+    this.kills = 0;
+    this.bosses = 0;
+    this.rerolls = 0;          // veces que ha cambiado las cartas de nivel en esta run
+    this.rerollBonus = perks.rerolls || 0;   // cambios comprados en Mejoras (más el gratis)
+    this.critChance = perks.crit || 0;       // probabilidad de golpe crítico (Mejoras)
+    this.itemLuck = 0;             // antigua suerte de mejoras: ya va en this.luck
+    this.skipBonus = perks.skips || 0;       // saltos de carta de nivel en esta run
+    this.skips = 0;
+    this.fourthCard = perks.fourth || 0;
+    this.revival = perks.revival || 0;       // Reponerse: 35 %, se elige al caer
+    this.reviveHad = { revive: false, maxrevive: false, revival: !!this.revival };
+    this.reviveSpent = { revive: false, maxrevive: false, revival: false };
+    this.reviveAsk = '';
+    this.revivePick = '';
+    this.reviveGiveUp = false;
+    this.banned = new Set();                 // movimientos vetados (Mejoras → Veto): no salen en las cartas
+    this.sealed = new Set();                 // objetos que dejas de ver (Mejoras → Sellar)
+    this.bind = {};                          // movimiento -> hueco fijo (0-3), elegido en Mejoras
+    this.coins = 0;            // monedas de la partida que sí pasan a la cuenta
+    this.runCandy = 0;         // caramelos de esta partida (tienda y bolas de pago)
+    this.candyEarned = 0;
+    this.candySpent = 0;
+    this.candyT = 0;
+    this.candySign = 1;
+    this.candyNote = '';
+    this.t1 = 0; this.t10 = 0; // tickets del gacha recogidos en esta run
+    this.dmgDealt = 0;
+
+    this.invuln = 0;
+    this.reviveSafe = 0;       // segundos tras revivir en los que nada te mata
+    this.flash = 0;
+    this.aim = Math.PI / 2;
+    this.moveAngle = Math.PI / 2;
+    this.walking = false;
+    this.inLiquid = false;
+    this.lavaTick = 0;
+    this.attackFace = 0;       // tiempo que sigue mirando al objetivo tras atacar
+    this.dead = false;
+    this.masteryRank = '';     // bronce, plata, oro o diamante; se fija al empezar
+    this.power = null;         // poder de altar activo: { def, t, dur }
+    this.slowT = 0;            // pegado por una trampa
+    this.item = null;          // último objeto cogido (data/items.js)
+    this.stacks = {};          // id → cuántos llevas esta partida
+    this.eggs = 0;             // huevos recogidos (aún no se incuban)
+    this.speciesEvo = 0;       // evoluciones de especie esta partida (la maestría suma 15 cada una)
+    this.typeBonus = {};
+    this.dashT = 0;
+    this.dashCd = 0;
+    this.dashA = 0;
+    this.focus = 0;            // hueco resaltado (el nombre de encima)
+    this.mark = null;          // última marca elegida (compatibilidad con la flecha)
+    this.marks = [];           // hasta 3 marcas elegidas en el mapa
+    this.sashT = -999;         // última vez que salvó la Banda Focus
+    this.bellHeal = 0;         // curación pendiente del Cascabel Concha
+    this.statsTaken = {};      // mejoras de stat cogidas (condición de evolución)
+    this.abil = null;          // efecto de su habilidad (data/ability-fx.js), lo pone game.js
+    this.sturdyAt = -999;      // última vez que le salvó Robustez
+  }
+
+  /** Pone la habilidad (G.AbilityFX.of) y aplica lo que hace al empezar. */
+  setAbility(id) {
+    this.abilId = id || '';
+    this.abil = G.AbilityFX.of(id, this.mon);
+    if (this.abil.cdMul) this.cdMul *= this.abil.cdMul;
+    if (this.abil.start) this.abil.start(this);
+  }
+
+  /** Segundos que hay que estar junto a un compañero caído para levantarlo. */
+  static get REVIVE_TIME() { return 3; }
+
+  // (×2 y luego ×4 el 2026-10-10: se subía de nivel demasiado rápido.)
+  static xpFor(level) {
+    return Math.floor((8 + level * 6 + Math.pow(level, 1.75) * 1.6) * 4);
+  }
+
+  cy() { return this.y; }
+
+  // ---------------- stats efectivos ----------------
+  get atk() {
+    const prod = this._atkItemProd || 1;
+    const scale = prod > 2.5 ? 2.5 / prod : 1;
+    return this.baseAtk * this.atkMul * scale * (1 + this.buffs.atk.n * this.buffs.atk.amount);
+  }
+  /**
+   * Ataque con un movimiento: el físico o el especial de tu Pokémon (ver
+   * G.Stats), con las danzas que sean de su lado (las de mejora, sin ninguna).
+   */
+  atkFor(m) {
+    const cat = m && m.cat, b = cat === 'physical' ? this.buffs.patk : cat === 'special' ? this.buffs.satk : null;
+    return this.atk * G.Stats.fit(this.mon, cat) * (b ? 1 + b.n * b.amount : 1) * (m && this.monoType(m.type) ? Player.MONO_K : 1);
+  }
+  /** Monotipo (19-10-2026): los de un solo tipo pegan un +20 % con los ataques de su tipo (tienen menos variedad). */
+  static get MONO_K() { return 1.2; }
+  monoType(type) { return this.mon.types.length === 1 && type === this.mon.types[0]; }
+  get spd() {
+    // (Habilidades: "steady" no se frena; speed() multiplica, ver data/ability-fx.js.)
+    const ab = this.abil || {}, stuck = this.slowT > 0 && !ab.steady;
+    const perm = this.baseSpd * Math.min(this.spdMul, 1.60);
+    let s = perm * (this._orbQuick ? 1.4 : 1) * (1 + this.buffs.spd.n * this.buffs.spd.amount) * (stuck ? 0.5 : 1) * (ab.speed ? ab.speed(this) : 1);
+    const w = G.Weather.speedFor(this.mon.types);
+    const slow = this.inLiquid && !ab.steady ? G.World.liquidEffect(this.mon.types).slow || 1 : 1;
+    s *= slow * w;
+    if (s > this.baseSpd * 2) s = this.baseSpd * 2;
+    return G.Judgment && G.Judgment.active ? G.Judgment.capSpd(s) : s;
+  }
+  get reduction() {
+    const arm = (this.armor || 0) * (this.armorMul || 1);
+    const fromArm = arm > 0 ? arm / (arm + 100) : 0;
+    // Chaleco Asalto: fuera del tope del 70 % de las cartas/mejoras de armadura.
+    const vest = (this.vestArmor || 0) * (this.armorMul || 1);
+    const fromVest = vest > 0 ? vest / (vest + 100) : 0;
+    return Math.min(0.85, Math.min(0.70, this.dmgReduce + fromArm + this.buffs.def.n * this.buffs.def.amount) + fromVest);
+  }
+  get regen() {
+    const run = G.Difficulty ? G.Difficulty.healing() : 1;
+    const raw = (this.regenFlat + this.buffs.regen.n * this.buffs.regen.amount) * (this.healMul || 1) * run;
+    return Math.min(raw, 8 + this.maxHp * 0.02);
+  }
+
+  // ---------------- movimientos ----------------
+  addMove(id) {
+    if (this.slots.length >= this.maxMoves || this.hasMove(id)) return false;
+    const m = G.Moves.instance(id, 1);
+    m.since = G.Game.st.time;          // desde cuándo lo tienes (daño por segundo en el resumen)
+    this.moves.push(m);
+    const group = [m];
+    group.on = true;             // al aprenderlo queda encendido; otro toque lo apaga
+    this.slots.push(group);
+    this.arrange();
+    if (!this.slots[this.active]) this.active = this.slots.indexOf(group);
+    this.focus = Math.max(0, this.slots.indexOf(group));
+    return true;
+  }
+
+  /** Quita un movimiento durante la run y conserva al menos un hueco jugable. */
+  forgetMove(id) {
+    if (this.moves.length <= 1) return false;
+    const m = this.moves.find(x => x.id === id);
+    if (!m) return false;
+    const gi = this.slots.findIndex(g => g.includes(m));
+    if (gi >= 0) {
+      const g = this.slots[gi];
+      g.splice(g.indexOf(m), 1);
+      if (!g.length) this.slots.splice(gi, 1);
+    }
+    this.moves.splice(this.moves.indexOf(m), 1);
+    this.active = Math.max(0, Math.min(this.active, this.slots.length - 1));
+    this.focus = Math.max(0, Math.min(this.focus, this.slots.length - 1));
+    this.arrange();
+    return true;
+  }
+
+  /**
+   * Huecos fijos (Mejoras → Atajos): cada movimiento con hueco elegido se pone
+   * en ese número para la memoria muscular (Confusión siempre en el 1...).
+   * Mientras no tengas tantos movimientos, va al más cercano; los demás
+   * rellenan los huecos libres en el orden en que los aprendiste.
+   */
+  arrange() {
+    const n = this.slots.length;
+    if (n < 2 || !this.bind) return;
+    const want = g => { let k = Infinity; for (const m of g) if (this.bind[m.id] != null) k = Math.min(k, this.bind[m.id]); return k; };
+    const cur = this.slots[this.active];
+    const out = new Array(n).fill(null);
+    const bound = this.slots.filter(g => want(g) < Infinity).sort((a, b) => want(a) - want(b));
+    for (const g of bound) {
+      let p = Math.min(want(g), n - 1);
+      while (p >= 0 && out[p]) p--;                          // ocupado: el de antes
+      if (p < 0) { p = 0; while (out[p]) p++; }              // o el primero libre
+      out[p] = g;
+    }
+    for (const g of this.slots) if (!out.includes(g)) out[out.indexOf(null)] = g;
+    this.slots = out;
+    if (cur) this.active = out.indexOf(cur);
+  }
+
+  hasMove(id) { return this.moves.some(m => m.id === id); }
+
+  /** Enciende ese hueco sin apagar los demás (al empezar la partida). */
+  setActive(i) {
+    const g = this.slots[i];
+    if (!g) return;
+    g.on = true;
+    this.active = i;
+    this.focus = i;
+  }
+
+  /**
+   * Enciende o apaga un hueco. Varios pueden estar encendidos a la vez:
+   * cada uno dispara con su propia recarga. Otro toque en el mismo lo apaga.
+   */
+  /** Asedio: 1–4 sólo eligen el hueco. No enciende ni apaga, y vale aunque esté vacío. */
+  selectSlot(i) {
+    if (i < 0 || i >= (this.maxMoves || 4)) return false;
+    this.focus = i;
+    if (this.slots[i]) this.active = i;
+    G.Audio.sfx('select');
+    return true;
+  }
+
+  toggleSlot(i) {
+    const g = this.slots[i];
+    if (!g || !g.length) return false;
+    const next = g.on === false;
+    g.on = next;
+    this.focus = i;
+    this.active = i;
+    if (!next && g.some(m => m.kind === 'orbit')) G.Projectiles.clearOrbs(this);
+    G.Audio.sfx('select');
+    return true;
+  }
+
+  /** Sólo mueve el resalte (Q / E, LB / RB). No apaga nada. */
+  cycle(dir) {
+    if (!this.slots.length) return;
+    this.focus = ((this.focus || 0) + dir + this.slots.length) % this.slots.length;
+  }
+
+  // ---------------- vínculos (fusiones) ----------------
+  // Cada legendario vencido da un vínculo. Con él se juntan movimientos en un
+  // solo hueco y se lanzan a la vez. Sólo crece un grupo (hasta BOND_MAX); si
+  // no hay ninguno a medias, el vínculo une dos movimientos sueltos.
+  static get BOND_MAX() { return 4; }
+
+  /** Lo que se puede hacer ahora con un vínculo: añadir a un grupo o unir dos sueltos. */
+  bondOptions() {
+    const loose = this.slots.filter(s => s.length === 1).map(s => s[0]);
+    const grow = this.slots.find(s => s.length > 1 && s.length < Player.BOND_MAX);
+    if (grow) return loose.length ? { mode: 'add', group: grow, loose } : null;
+    return loose.length >= 2 ? { mode: 'pair', group: null, loose } : null;
+  }
+
+  /** Junta `moves` (sueltos) en el grupo `group` (o en uno nuevo) y gasta un vínculo. */
+  fuse(moves, group = null) {
+    const target = group || this.slots.find(s => s[0] === moves[0]);
+    let on = target.on !== false;
+    for (const m of moves) {
+      if (target.includes(m)) continue;
+      const i = this.slots.findIndex(s => s.length === 1 && s[0] === m);
+      if (i < 0) continue;
+      if (this.slots[i].on !== false) on = true;
+      this.slots.splice(i, 1);
+      target.push(m);
+    }
+    target.on = on;
+    this.arrange();
+    this.focus = Math.max(0, this.slots.indexOf(target));
+    this.active = this.focus;
+    this.bonds = Math.max(0, this.bonds - 1);
+    G.Projectiles.clearOrbs(this);
+    return target;
+  }
+
+  /** Los que están encendidos, de todos los huecos (cada uno con su recarga). */
+  enabledMoves() {
+    const out = [];
+    for (const g of this.slots) if (g && g.on !== false) for (const m of g) out.push(m);
+    return out;
+  }
+
+  activeGroup() { return this.enabledMoves(); }
+
+  activeMove() {
+    const all = this.enabledMoves();
+    return all.find(m => m.kind === 'projectile' || m.kind === 'beam') || all[0];
+  }
+
+  /**
+   * Lo llama combat.js al lanzar un movimiento. Elige la animación de PMD y la
+   * acelera si la recarga es más corta que la animación, para que encadene.
+   */
+  cast(m) {
+    const anim = { melee: 'Attack', beam: 'Shoot', projectile: 'Shoot', nova: 'Attack',
+                   aura: 'Charge', buff: 'Charge', orbit: 'Charge', boomerang: 'Shoot', chain: 'Shoot',
+                   mine: 'Charge', meteor: 'Charge', turret: 'Charge', dash: 'Attack', trail: 'Walk', cone: 'Shoot' }[m.kind] || 'Attack';
+    // Las familias nuevas suenan como la parecida de las de siempre.
+    const SND = { boomerang: 'projectile', chain: 'beam', mine: 'nova', meteor: 'nova', turret: 'buff', dash: 'melee', trail: 'aura', cone: 'projectile' };
+    // El rastro no suena a cada charco (sería un zumbido constante).
+    if (m.kind !== 'trail') G.Audio.sfx('shot', { kind: SND[m.kind] || m.kind, type: m.type });
+    if (m.kind === 'trail') return;
+    // No reinicies una animación que va por la mitad: se vería a tirones.
+    if (this.anim.busy() && this.anim.progress() < 0.65) return;
+    const meta = G.Sprites.animMeta(this.dex, anim);
+    const len = meta ? meta.d.reduce((a, b) => a + b, 0) / 60 : 0.4;
+    const cd = Math.max(0.12, m.cd * Math.max(0.45, this.cdMul));
+    this.anim.play(anim, { speed: Math.max(1, len / (cd * 0.9)) });
+    this.attackFace = 0.35;
+  }
+
+  // ---------------- daño y curación ----------------
+  /**
+   * @param type  tipo del ataque (tabla de tipos y clima); sin tipo, daño tal cual
+   * @param pure  daño que no baja con la defensa ni el cuerpo a cuerpo (Arceus)
+   */
+  /** @param cat  'physical' | 'special': con qué defensa tuya se para (la del enemigo que pega). */
+  hurt(amount, type = null, pure = false, cat = null) {
+    if (this.dead) return;
+    if (this.reviveSafe > 0) {
+      this.invuln = Math.max(this.invuln || 0, this.reviveSafe);
+      return;
+    }
+    if (this.invuln > 0) return;
+    // Habilidad (data/ability-fx.js): absorber un tipo, esquivar o recibir menos.
+    const ab = this.abil, cls = cat === 'physical' ? 'p' : cat === 'special' ? 's' : '';
+    if (ab && !pure) {
+      if (type && ab.absorb === type) {
+        this.invuln = 0.3;
+        this.heal(this.maxHp * 0.03);
+        return;
+      }
+      if (ab.dodge && Math.random() < ab.dodge(this, type, cls)) {
+        this.invuln = 0.3;
+        G.FX.dmgText(this.x, this.y - this.bodyH - 4, '¡Esquiva!', '#bfe8ff');
+        return;
+      }
+      if (this.evade > 0 && Math.random() < this.evade) {
+        this.invuln = 0.3;
+        G.FX.dmgText(this.x, this.y - this.bodyH - 4, '¡Esquiva!', '#bfe8ff');
+        return;
+      }
+      if (ab.inMul) amount *= ab.inMul(this, type, cls);
+    }
+    if (!pure) amount *= G.Stats.taken(this.mon, cat);
+    let eff = null;
+    if (type) {
+      const k = G.Types.mult(type, this.mon.types);
+      eff = G.Types.label(k);
+      amount *= k * G.Weather.mult(type);
+    }
+    // Con un ataque cuerpo a cuerpo activo se recibe un 25 % menos: hay que
+    // estar encima de los enemigos para pegar (iban muy por detrás).
+    const firing = this.enabledMoves().filter(m => m.kind !== 'buff' && m.kind !== 'aura');
+    const close = firing.length && firing.every(m => m.kind === 'melee') ? 0.75 : 1;
+    const d = pure ? Math.max(1, amount) : Math.max(1, amount * (1 - this.reduction) * close);
+    this.hp -= d;
+    this.invuln = 0.45;
+    this.flash = 0.14;
+    G.Audio.sfx('hurt');
+    G.Camera.kick(0.28);
+    if (!this.remote) G.Pad.rumble(0.25 + Math.min(0.75, d / this.maxHp * 3), 140);
+    G.FX.dmgText(this.x, this.y - this.bodyH - 4, '-' + Math.round(d), eff === 'super' ? '#ff3048' : eff === 'weak' ? '#c9a0a8' : '#ff6b7a', eff === 'super');
+    G.FX.burst(this.x, this.y - this.bodyH * 0.5, '#ff5f6d', 6, 90);
+    if (this.hp <= 0) G.Items.sash(this);
+    // Robustez (habilidad): lo mismo, una vez cada 90 s.
+    if (this.hp <= 0 && ab && ab.sturdy && performance.now() - this.sturdyAt > 90000) {
+      this.sturdyAt = performance.now();
+      this.hp = 1; this.invuln = 1.2;
+      G.FX.dmgText(this.x, this.y - this.bodyH - 16, '¡Robustez!', '#c9b48a', true);
+      G.FX.ring(this.x, this.y, 6, 70, '#c9b48a', 0.5, 4);
+    }
+    if (ab && ab.hurt && this.hp > 0) ab.hurt(this, type, cls);
+    G.Items.onDamaged(this);
+    if (this.hp <= 0) {
+      this.hp = 0; this.dead = true;
+      if (G.MasteryFX) G.MasteryFX.clear(this);
+      this.anim.play('Faint', { hold: true });
+      G.Projectiles.clearOrbs(this);
+      this.reviveT = 0;
+      this.reviveAsk = '';
+      this.revivePick = '';
+      this.reviveGiveUp = false;
+      this._reviveLock = false;
+      if (!this.remote && G.Siege && G.Siege.noteDeath) G.Siege.noteDeath(this);
+    }
+  }
+
+  heal(amount) {
+    if (G.Difficulty) amount *= G.Difficulty.healing();
+    if (this.healMul) amount *= this.healMul;
+    if (this.abil && this.abil.healMul) amount *= this.abil.healMul;     // Gula, Recogida
+    const before = this.hp;
+    this.hp = Math.min(this.maxHp, this.hp + amount);
+    const got = Math.round(this.hp - before);
+    if (got >= 1) G.FX.dmgText(this.x, this.y - this.bodyH - 6, '+' + got, '#5fe08a');
+  }
+
+  addMaxHp(amount) { this.maxHp += amount; this.hp += amount; }
+
+  /** Devuelve cuántos niveles ha subido (pueden ser varios de golpe). */
+  gainXp(amount) {
+    const add = amount * Math.min(2, this.xpMul || 1);
+    if (!Number.isFinite(add) || add <= 0) return 0;     // una experiencia infinita no acababa nunca de subir niveles
+    this.xp += add;
+    let leveled = 0;
+    while (this.xp >= this.xpNext && leveled < 50) {
+      this.xp -= this.xpNext;
+      this.level++;
+      this.xpNext = Player.xpFor(this.level);
+      leveled++;
+    }
+    return leveled;
+  }
+
+  // ---------------- objeto equipado ----------------
+  hasItem(id) { return (this.stacks && this.stacks[id] > 0) || this.item === id; }
+
+  /** Suma un objeto. Si ya está al tope, no hace nada. */
+  equip(id) { return G.Items.gain(this, id); }
+
+  /** Espacio: un empujón corto hacia donde te mueves. */
+  tryDash() {
+    if (this.dead || this.frozen || this.dashCd > 0 || this.dashT > 0) return false;
+    const [ax, ay] = G.Input.axis();
+    const a = (ax || ay) ? Math.atan2(ay, ax) : (Number.isFinite(this.moveAngle) ? this.moveAngle : (this.aim || 0));
+    this.dashA = a;
+    this.dashT = 0.18;
+    this.dashCd = 2.5;
+    this.moveAngle = a;
+    this.walking = true;
+    return true;
+  }
+
+  /** Cascabel Concha: un poco de vida por el daño que haces (tope 4/s). */
+  onDealt(dmg) {
+    if (this.hasItem('shellbell')) this.bellHeal += dmg * 0.01 * (this.healMul || 1);
+  }
+
+  /** Poder de un altar (ver systems/interact.js): se aplica y se quita solo. */
+  addPower(def, dur) {
+    if (this.power) this.power.def.off(this);
+    def.on(this);
+    this.power = { def, t: dur, dur };
+  }
+
+  addBuff(stat, amount, dur, maxStacks) {
+    const b = this.buffs[stat];
+    if (!b) return;
+    // No borrar capas de otra fuente con un maxStacks más bajo (p. ej. Armadura
+    // Frágil sobre Impasible / Cobardía).
+    const n = Math.min(maxStacks, b.n + 1);
+    if (n >= b.n) { b.n = n; b.amount = amount; }
+    b.t = dur;
+  }
+
+  // ---------------- ciclo ----------------
+  update(dt) {
+    this.anim.update(dt);
+    if (G.MasteryFX) G.MasteryFX.update(this, dt);
+    if (this.dead) return;
+    if (this.invuln > 0) this.invuln -= dt;
+    if (this.reviveSafe > 0) this.reviveSafe -= dt;
+    if (this.flash > 0) this.flash -= dt;
+    if (this.candyT > 0) this.candyT -= dt;
+    if (this.attackFace > 0) this.attackFace -= dt;
+
+    for (const k in this.buffs) {
+      const b = this.buffs[k];
+      if (b.n > 0) { b.t -= dt; if (b.t <= 0) b.n = 0; }
+    }
+    if (this.slowT > 0) this.slowT -= dt;
+    if (this.bellHeal > 0) {
+      const room = Math.max(0, (8 + this.maxHp * 0.02) * dt - Math.max(0, this.regen) * dt);
+      const h = Math.min(this.bellHeal, this.maxHp * 0.015 * dt, room);
+      if (h > 0) this.hp = Math.min(this.maxHp, this.hp + h * (G.Difficulty ? G.Difficulty.healing() : 1));
+      this.bellHeal -= h;
+    }
+    if (this.power && (this.power.t -= dt) <= 0) { this.power.def.off(this); this.power = null; }
+    if (this.regen > 0) this.hp = Math.min(this.maxHp, this.hp + this.regen * dt);
+    if (G.Items && G.Items.tick) G.Items.tick(this, dt);
+    if (this.abil && this.abil.tick) this.abil.tick(this, dt);
+    // Sequía, Llovizna...: en grupo el anfitrión manda el clima; un invitado lo pide.
+    if (this.abil && this.abil.summon && !this.remote && (this.sumT = (this.sumT || 0) - dt) <= 0) {
+      this.sumT = 180;
+      if (G.Weather.current) { /* ya hay uno */ }
+      else if (!G.Coop.active || G.Coop.isHost) G.Weather.debugStart(this.abil.summon, 60);
+      else G.Coop.toHost(['wxq', this.abil.summon]);
+    }
+
+    // --- movimiento con colisiones ---
+    if (this.dashCd > 0) this.dashCd -= dt;
+    // --- movimiento con colisiones ---
+    // (En cooperativo la pausa no para el juego: sólo te quedas quieto.)
+    const [ax, ay] = this.frozen ? [0, 0] : G.Input.axis();
+    if (this.dashT > 0 && !this.frozen) {
+      this.dashT -= dt;
+      const sp = 720;
+      this.svx = Math.cos(this.dashA) * sp;
+      this.svy = Math.sin(this.dashA) * sp;
+      this.walking = true;
+    } else {
+      this.walking = ax !== 0 || ay !== 0;
+      const s = this.spd;
+      // Hielo: resbalas (la velocidad cambia despacio).
+      const slide = this.inLiquid && G.World.liquidEffect(this.mon.types).slide;
+      this.svx = slide ? G.U.damp(this.svx || 0, ax * s * 1.15, 1.6, dt) : ax * s;
+      this.svy = slide ? G.U.damp(this.svy || 0, ay * s * 1.15, 1.6, dt) : ay * s;
+      if (this.walking) this.moveAngle = Math.atan2(ay, ax);
+    }
+    this.x += this.svx * dt;
+    this.y += this.svy * dt;
+    if (!this.dead && G.Game && G.Game.player === this) {
+      const step = Math.hypot(this.svx || 0, this.svy || 0) * dt;
+      if (step > 0.4) this.hatchSteps = (this.hatchSteps || 0) + step / 18;
+    }
+    G.World.collide(this);
+    // --- terreno líquido ---
+    // (Levitación: flota por encima del agua y la lava.)
+    this.inLiquid = !(this.abil && this.abil.levitate) && G.World.isLiquid(this.x, this.y);
+    if (this.inLiquid) {
+      const le = G.World.liquidEffect(this.mon.types);
+      if (le.dmg && !(this.abil && this.abil.lavaProof)) {
+        this.lavaTick -= dt;
+        if (this.lavaTick <= 0) {
+          this.lavaTick = le.every; this.invuln = 0;
+          this.hurt(Math.max(le.flat, this.maxHp * le.dmg * 0.5));
+          G.FX.burst(this.x, this.y - 4, le.color, 5, 70);
+        }
+      } else if (this.walking && Math.random() < dt * 8) {
+        G.FX.burst(this.x, this.y, le.slide ? '#ffffff' : '#b3defa', 2, 40);
+      }
+    }
+
+    // --- apuntado: enemigo más cercano; si no hay, hacia donde caminas ---
+    // Prioridad de blanco según el ataque activo:
+    //   a distancia (proyectil, rayo): el jefe si está a tiro > lo que te toca > el más cercano
+    //   cuerpo a cuerpo y el resto:   lo que te toca > el jefe > el más cercano
+    // Con una horda encima casi siempre te toca algo; si eso ganara siempre,
+    // los ataques a distancia no le darían nunca al jefe.
+    // Sin enemigos, apunta a la roca o cofre más cercano.
+    if (G.Siege && G.Siege.up && !this.remote) {
+      this.target = null;
+      const phone = G.SkillAim && G.SkillAim.finger && G.SkillAim.finger();
+      if (phone) {
+        this.manualAim = false;
+        const drag = G.SkillAim.liveDir && G.SkillAim.liveDir();
+        if (drag) this.aim = Math.atan2(drag.y, drag.x);
+        else if (this.walking) this.aim = this.moveAngle;
+      } else {
+        this.manualAim = true;
+        const w = G.Input.mouseWorld();
+        const dx = w.x - this.x, dy = w.y - this.y;
+        if (dx * dx + dy * dy > 16) this.aim = Math.atan2(dy, dx);
+        else if (this.walking) this.aim = this.moveAngle;
+      }
+      const face = this.attackFace > 0 || !this.walking ? this.aim : this.moveAngle;
+      this.anim.dir = G.Sprites.dirFromAngle(face);
+      this.anim.loop(this.walking ? 'Walk' : 'Idle', this.walking ? this.spd / 110 : 1);
+      return;
+    }
+    const all = G.EnemyMgr.all();
+    const mine = this.uid || 'me';
+    const foes = (G.Siege && G.Siege.up) ? all.filter(e => !(e.owner && e.owner === mine)) : all;
+    const m = this.activeMove();
+    const ranged = !!m && (m.kind === 'projectile' || m.kind === 'beam');
+    const threat = G.Projectiles.nearest(foes, this.x, this.y, this.r + 24);
+    const boss = foes.find(e => e.boss && !e.dead && G.U.dist(this.x, this.y, e.x, e.y) < 330);
+    let tg = (ranged ? boss || threat : threat || boss)
+            || G.Projectiles.nearest(foes, this.x, this.y, 520)
+            || G.World.nearestBreakable(this.x, this.y, 200);
+    // Asedio: jugadores y monstruos enemigos a tiro; si no hay, el castillo.
+    const siegePool = (G.Siege && G.Siege.up && G.Siege.marks) ? foes.concat(G.Siege.marks(this)) : foes;
+    if (G.Siege && G.Siege.up && G.Siege.pickAim) {
+      const aim = G.Siege.pickAim(this, this.x, this.y, 720);
+      if (aim) tg = aim;
+    }
+    // Apuntar a mano (Ajustes > Accesibilidad): hacia el ratón o el stick derecho.
+    // El blanco (para la cadena) es el enemigo que hay en esa dirección; si no
+    // hay ninguno, el de siempre.
+    const hand = this.handAim();
+    this.manualAim = hand != null;
+    if (hand != null) {
+      this.aim = hand;
+      this.target = this.enemyAlong(siegePool, hand) || tg;
+    } else {
+      this.target = tg;
+      if (tg) this.aim = Math.atan2(tg.y - this.y, tg.x - this.x);
+      else if (this.walking) this.aim = this.moveAngle;
+    }
+
+    // --- animación: mira al objetivo al atacar, si no a donde camina ---
+    const face = this.attackFace > 0 || !this.walking ? this.aim : this.moveAngle;
+    this.anim.dir = G.Sprites.dirFromAngle(face);
+    this.anim.loop(this.walking ? 'Walk' : 'Idle', this.walking ? this.spd / 110 : 1);
+  }
+
+  /**
+   * Ángulo de "Apuntar a mano", o null si toca apuntar solo. Manda lo último
+   * que se haya usado: el stick derecho mientras se empuja; si no, el ratón si
+   * se ha movido después (en PC). Soltar el stick sin tocar el ratón = solo.
+   */
+  handAim() {
+    // En el móvil (táctil) no hay apuntado a mano: siempre apunta solo.
+    if (this.remote || G.Settings.touch || !G.Settings.get('aimManual')) return null;
+    const st = G.Pad.aim();
+    if (st) return Math.atan2(st[1], st[0]);
+    if (G.Touch.active || !G.Input.mouseMovedAt || G.Input.mouseMovedAt < G.Pad.aimAt) return null;
+    const w = G.Input.mouseWorld();
+    const dx = w.x - this.x, dy = w.y - (this.y - G.LIFT * 0.5);
+    return Math.hypot(dx, dy) < 4 ? null : Math.atan2(dy, dx);
+  }
+
+  /** El enemigo más cercano dentro de ±25° de la dirección a (a menos de 520). */
+  enemyAlong(all, a) {
+    let best = null, bd = 520 * 520;
+    const ca = Math.cos(a), sa = Math.sin(a), cosMax = Math.cos(0.44);
+    for (const e of all) {
+      if (e.dead) continue;
+      const dx = e.x - this.x, dy = e.y - this.y, d2 = dx * dx + dy * dy;
+      if (d2 >= bd || d2 < 1) continue;
+      if ((dx * ca + dy * sa) / Math.sqrt(d2) < cosMax) continue;
+      bd = d2; best = e;
+    }
+    return best;
+  }
+
+  /** Vuelve a levantarse (lo revive un compañero en cooperativo). */
+  revive(frac = 0.5) {
+    this.dead = false;
+    this._siegeXp = false;
+    this._hitBy = '';
+    this.hp = Math.max(1, this.maxHp * frac);
+    this.invuln = 2;
+    this.reviveSafe = 2;
+    this.reviveT = 0;
+    this.reviveAsk = '';
+    this.revivePick = '';
+    this.reviveGiveUp = false;
+    this._reviveLock = false;
+    this.anim._start('Idle', false);
+    if (G.MasteryFX) G.MasteryFX.onRevive(this);
+    G.FX.ring(this.x, this.y, 6, 70, '#5fe08a', 0.5, 4);
+    G.FX.burst(this.x, this.y - this.bodyH * 0.5, '#9dffb8', 18, 150);
+    G.Audio.sfx('heal');
+  }
+
+  // ---------------- compañero (cooperativo) ----------------
+
+  /**
+   * Un compañero en otro ordenador: su dueño manda su estado (posición, vida,
+   * movimiento activo...) y aquí se sigue con suavidad.
+   * n = { x, y, ang, walk, hp, maxHp, dead, mv, ml, mag, aim, rev }
+   */
+  netUpdate(dt) {
+    this.anim.update(dt);
+    const n = this.net;
+    if (!n) return;
+    if (typeof n.lv === 'number') this.level = n.lv;
+    if (this.flash > 0) this.flash -= dt;
+    if (this.attackFace > 0) this.attackFace -= dt;
+    if (G.U.dist2(this.x, this.y, n.x, n.y) > 300 * 300) { this.x = n.x; this.y = n.y; }
+    else { this.x = G.U.damp(this.x, n.x, 14, dt); this.y = G.U.damp(this.y, n.y, 14, dt); }
+    if (n.hp < this.hp - 0.5 && !n.dead) this.flash = 0.14;
+    this.hp = n.hp; this.maxHp = n.maxHp;
+    this.magnet = n.mag || this.magnet;
+    this.reviveT = n.rev || 0;
+    if (n.dead && !this.dead) {
+      this.dead = true; this._reviveLock = false; this.reviveGiveUp = false;
+      if (G.MasteryFX) G.MasteryFX.clear(this); this.anim.play('Faint', { hold: true }); G.Projectiles.clearOrbs(this);
+    }
+    else if (!n.dead && this.dead) this.revive(n.hp / (n.maxHp || 1));
+    // Movimiento activo (para el halo, el HUD y los orbes).
+    if (n.mv && (!this.moves[0] || this.moves[0].id !== n.mv || this.moves[0].lvl !== n.ml) && G.Moves.BY_ID[n.mv]) {
+      this.moves = [G.Moves.instance(n.mv, n.ml || 1)];
+      this.slots = [this.moves.slice()];
+      this.active = 0;
+      G.Projectiles.clearOrbs(this);
+    }
+    if (this.dead) return;
+    // Tras revivir, revive() pone reviveSafe/invuln. El jugador local los baja en
+    // update(); el títere sólo pasa por aquí, y si no bajan, en asedio foePlayers
+    // y poke le dejan inmune para siempre.
+    if (this.reviveSafe > 0) this.reviveSafe -= dt;
+    if (this.invuln > 0) this.invuln -= dt;
+    if (this.spawnGuard > 0) this.spawnGuard -= dt;
+    this.walking = !!n.walk;
+    this.moveAngle = n.ang;
+    this.aim = n.aim;
+    const face = this.attackFace > 0 || !this.walking ? this.aim : this.moveAngle;
+    this.anim.dir = G.Sprites.dirFromAngle(face);
+    this.anim.loop(this.walking ? 'Walk' : 'Idle', this.walking ? this.baseSpd / 110 : 1);
+    if (G.MasteryFX) G.MasteryFX.update(this, dt);
+  }
+
+  draw(ctx) {
+    // Halo del tipo del movimiento activo, en el suelo.
+    const m = this.activeMove();
+    if (m && !this.dead) {
+      ctx.save();
+      ctx.globalAlpha = 0.22;
+      ctx.strokeStyle = G.U.TYPE_COLOR[m.type];
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(this.x, this.y, this.r * 1.5, this.r * 0.6, 0, 0, 6.2832); ctx.stroke();
+      ctx.restore();
+    }
+    G.Sprites.drawShadow(ctx, this.dex, this.x, this.y, this.scale);
+    if (this.dashT > 0) {
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      ctx.strokeStyle = '#f4f8ff';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.ellipse(this.x, this.y, this.r * 2.2, this.r * 0.9, 0, 0, 6.2832); ctx.stroke();
+      ctx.restore();
+    }
+    if (G.MasteryFX) { G.MasteryFX.drawGround(ctx, this); G.MasteryFX.drawBehind(ctx, this); }
+    // Poder de altar: aro de su color latiendo bajo los pies.
+    if (this.power && !this.dead) {
+      ctx.save();
+      ctx.globalAlpha = 0.35 + Math.sin(performance.now() / 120) * 0.15;
+      ctx.strokeStyle = this.power.def.color; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.ellipse(this.x, this.y, this.r * 2.1, this.r * 0.85, 0, 0, 6.2832); ctx.stroke();
+      ctx.restore();
+    }
+
+    const alpha = this.invuln > 0 && !this.dead ? (Math.floor(this.invuln * 18) % 2 ? 0.45 : 1) : 1;
+    this.anim.draw(ctx, this.x, this.y, { flash: this.flash > 0, softFlash: true, alpha, color: '#ffcb3d' });
+    if (G.MasteryFX) G.MasteryFX.drawFront(ctx, this);
+
+    // Arcos de buff alrededor de los pies.
+    const COL = { atk: '#ff6b4d', patk: '#ff6b4d', satk: '#c47bff', spd: '#7fe0ff', def: '#b0b8c8', regen: '#5fe08a' };
+    let i = 0;
+    for (const k in this.buffs) {
+      const b = this.buffs[k];
+      if (b.n <= 0) continue;
+      ctx.save();
+      ctx.globalAlpha = 0.6;
+      ctx.strokeStyle = COL[k];
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, this.r * 1.8 + i * 5, (this.r * 1.8 + i * 5) * 0.42, 0, 0, 6.2832 * (b.n / 5));
+      ctx.stroke();
+      ctx.restore();
+      i++;
+    }
+
+    // Cooperativo: anillo de "reviviendo" y nombre encima.
+    if (this.dead && this.reviveT > 0) {
+      ctx.save();
+      ctx.strokeStyle = '#5fe08a';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.ellipse(this.x, this.y, this.r * 2.4, this.r * 1.0, 0, -Math.PI / 2, -Math.PI / 2 + 6.2832 * Math.min(1, this.reviveT / G.Player.REVIVE_TIME));
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (this.tag) {
+      ctx.save();
+      ctx.font = '700 7px Pixelify,"Segoe UI",sans-serif';
+      ctx.textAlign = 'center';
+      const y = this.y - this.bodyH - 8;
+      ctx.lineWidth = 2.5; ctx.strokeStyle = 'rgba(0,0,0,.75)';
+      G.I18n.rawCanvas(ctx, 'strokeText', this.tag, this.x, y);
+      ctx.fillStyle = this.dead ? '#ff8a96' : this.tagColor || '#fff';
+      G.I18n.rawCanvas(ctx, 'fillText', this.tag, this.x, y);
+      if (this.dead) {
+        ctx.font = '700 6px Pixelify,"Segoe UI",sans-serif';
+        ctx.strokeText(this.revLabel || '', this.x, y - 8);
+        ctx.fillText(this.revLabel || '', this.x, y - 8);
+      }
+      ctx.restore();
+    }
+  }
+};
