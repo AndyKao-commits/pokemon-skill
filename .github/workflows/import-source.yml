@@ -1,0 +1,28 @@
+name: Import source snapshot
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/import-source.yml'
+permissions:
+  contents: write
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - name: Clone original source into separate directory
+        run: git clone --depth 1 https://github.com/AndyKao-commits/ADOLF-S-POKE.git /tmp/pokemon-original
+      - name: Import complete current source without original Git history or CI workflows
+        run: |
+          set -euo pipefail
+          rsync -a --delete --exclude='.git/' --exclude='.github/' --exclude='.env' --exclude='.env.*' --exclude='*.pem' --exclude='*.key' /tmp/pokemon-original/ ./
+          printf '%s\n' '# pokemon-skill' '' 'Independent development copy of ADOLF-S-POKE for a new arena battler. Source code and assets retain their original licenses and attribution; see LICENSE, LICENSE-NONCOMMERCIAL.md and CREDITS.md.' '' 'Imported from https://github.com/AndyKao-commits/ADOLF-S-POKE . This repository is not linked to the original game database or production deployment.' > IMPORT-NOTES.md
+      - name: Commit source snapshot
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --quiet || (git commit -m 'Import ADOLF-S-POKE source snapshot' && git push)
